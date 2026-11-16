@@ -1,0 +1,26 @@
+[Unit]
+Description=netkey LAN party port (retro-LAN NIC in an isolated namespace, DHCP/DNS, NAT)
+Documentation=file:///opt/netkey/README.md
+After=network-online.target local-fs.target netkey-nat.service
+Wants=network-online.target
+PartOf=netkey.target
+
+[Service]
+Type=simple
+# root: creates network namespaces, moves the NIC, loads nft rules, runs dnsmasq (which drops to nobody)
+ExecStart=/usr/bin/python3 /opt/netkey/modem.py --config /etc/netkey/config.toml --lan --state-dir /var/lib/netkey
+ExecStopPost=-/usr/bin/python3 /opt/netkey/modem.py --config /etc/netkey/config.toml --lan-teardown --state-dir /var/lib/netkey
+RuntimeDirectory=netkey-lan
+RuntimeDirectoryMode=0755
+# keep the DHCP leases across restarts (updates): PCs keep their address and would vanish from the GUI
+RuntimeDirectoryPreserve=yes
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=20
+SyslogIdentifier=netkey-lan
+# no PrivateTmp/ProtectHome: they give the unit its own mount namespace, and the network namespaces it creates
+# (bind mounts in /run/netns) would be invisible to `ip netns exec` everywhere else (diagnose.sh, dnsmasq debugging)
+
+[Install]
+WantedBy=netkey.target

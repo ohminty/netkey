@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Forgot the web GUI password? Run this on the Pi (keyboard or SSH):  sudo netkey-passreset
+# The login goes back to admin / admin, and NetKey asks for a new password at the next sign-in.
+# Dial-in users, settings and parties are not touched.
+set -euo pipefail
+if [[ $EUID -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+sudo -u netkey python3 /opt/netkey/modem.py --reset-admin --state-dir /var/lib/netkey >/dev/null
+echo "The NetKey web GUI login is admin / admin again."
+echo "Open https://$(hostname).local/ and sign in: NetKey asks you to choose a new password right away."

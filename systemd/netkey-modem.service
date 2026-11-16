@@ -1,0 +1,33 @@
+[Unit]
+Description=netkey hot-plug manager (one modem line per USB serial adapter)
+Documentation=file:///opt/netkey/README.md
+Requires=netkey-nat.service
+After=netkey-nat.service network-online.target local-fs.target
+PartOf=netkey.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=netkey
+Group=netkey
+SupplementaryGroups=dialout dip
+StateDirectory=netkey
+StateDirectoryMode=0750
+# /run/netkey: live line status for the web GUI (also written by /etc/ppp/ip-up.d/netkey)
+RuntimeDirectory=netkey
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/python3 /opt/netkey/modem.py --config /etc/netkey/config.toml --manager
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=20
+SyslogIdentifier=netkey-modem
+# NoNewPrivileges (and options implying it) must stay off: pppd is setuid root.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0027
+
+[Install]
+WantedBy=netkey.target

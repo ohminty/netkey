@@ -1,0 +1,34 @@
+#!/usr/sbin/nft -f
+# NAT for dial-up clients. Loaded by netkey-modem.service (ExecStartPre), removed on stop.
+# Self-contained table: never touches other tables or the system ruleset.
+define PPP_NET = 10.66.0.0/24
+
+# idempotent atomic replace
+table inet netkey_nat
+delete table inet netkey_nat
+
+table inet netkey_nat {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        iifname "ppp*" ip saddr $PPP_NET jump from_ppp
+    }
+
+    chain from_ppp {
+        ct state established,related accept
+        icmp type echo-request accept
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        iifname "ppp*" tcp flags syn tcp option maxseg size set rt mtu
+        oifname "ppp*" tcp flags syn tcp option maxseg size set rt mtu
+        ip daddr $PPP_NET ct state established,related accept
+        ip daddr $PPP_NET counter drop
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip saddr $PPP_NET oifname != "ppp*" masquerade
+    }
+}

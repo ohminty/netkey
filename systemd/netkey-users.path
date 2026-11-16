@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the netkey dial-in user list exported by the web GUI
+Documentation=file:///opt/netkey/README.md
+PartOf=netkey.target
+
+[Path]
+PathChanged=/var/lib/netkey/pap-users.json
+Unit=netkey-users.service
+
+[Install]
+WantedBy=netkey.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=netkey dial-up gateway (NAT + all modem lines)
+Documentation=file:///opt/netkey/README.md
+Wants=netkey-nat.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply netkey dial-in users to /etc/ppp/pap-secrets
+Documentation=file:///opt/netkey/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/netkey/modem.py --config /etc/netkey/config.toml --sync-pap-secrets --state-dir /var/lib/netkey
+SyslogIdentifier=netkey-users
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/ppp /var/lib/netkey
+ProtectSystem=strict

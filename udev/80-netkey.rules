@@ -1,0 +1,3 @@
+# netkey: every USB serial adapter is a modem line (installed by install.sh).
+# Keep ModemManager away and make the port usable by group dialout.
+SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*|ttyACM[0-9]*", ENV{ID_BUS}=="usb", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"

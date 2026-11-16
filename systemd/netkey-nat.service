@@ -1,0 +1,16 @@
+[Unit]
+Description=netkey NAT and IP forwarding for dial-up clients
+Documentation=file:///opt/netkey/README.md
+Wants=network-online.target
+After=network-online.target
+PartOf=netkey.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/sysctl -q -w net.ipv4.ip_forward=1
+ExecStart=/usr/sbin/nft -f /etc/netkey/netkey.nft
+ExecStop=-/usr/sbin/nft delete table inet netkey_nat
+
+[Install]
+WantedBy=netkey.target
