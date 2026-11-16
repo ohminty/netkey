@@ -7,9 +7,11 @@ first hour getting the network up? The games were worth it. Most of them still a
 live in other cities, and games like Duke Nukem 3D, Warcraft II, Command & Conquer and the original Diablo only
 know how to find each other on a local network. They've never heard of the internet.
 
-NetKey fixes that. It's a small box ( running on a Raspberry Pi) that you plug your old PC into. Your friends do the same at
+NetKey fixes that. It's a small box (running on a Raspberry Pi) that you plug your old PC into. Your friends do the same at
 their place. One of you starts a party, sends the others a code, and every old PC ends up on the same network, as if
 you were all sitting in the same room again.
+
+![The NetKey dashboard: hosting a LAN party with two retro PCs, live traffic and the IPX and NetBEUI frames on the network](docs/dashboard.png)
 
 ## How it works for you
 
