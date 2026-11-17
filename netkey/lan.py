@@ -474,7 +474,10 @@ class LanDaemon:
         elif links[name].get("master") not in (BRIDGE, PROBE_BRIDGE) or \
                 (links[name].get("master") == BRIDGE) != self.nic_ok:
             self.run("ip", "-n", self.ns(), "link", "set", name, "master", BRIDGE if self.nic_ok else PROBE_BRIDGE)
-        self.run("ip", "-n", self.ns(), "link", "set", name, "up")
+        # only when needed: "up" on a link that is already up still makes some drivers (r8152) reprogram their
+        # receive filter over USB, every step
+        if name not in links or "UP" not in links[name].get("flags", []):
+            self.run("ip", "-n", self.ns(), "link", "set", name, "up")
         self.nic = name
 
     def nic_driver(self, name):

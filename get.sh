@@ -17,19 +17,21 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 main() {
     [[ $EUID -eq 0 ]] || die "run as root: curl -fsSL https://raw.githubusercontent.com/$REPO/main/get.sh | sudo bash"
     command -v curl >/dev/null || die "curl is missing: sudo apt install curl"
-    local url
+    local url alt=""
     if [[ -n ${NETKEY_URL:-} ]]; then
         url=$NETKEY_URL
     elif [[ -n ${NETKEY_VERSION:-} ]]; then
         [[ $NETKEY_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "bad NETKEY_VERSION: $NETKEY_VERSION"
         url="https://github.com/$REPO/releases/download/v$NETKEY_VERSION/$ASSET"
+        alt="https://github.com/$REPO/releases/download/$NETKEY_VERSION/$ASSET"    # tag without the "v"
     else
         url="https://github.com/$REPO/releases/latest/download/$ASSET"
     fi
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     printf '\033[1m==>\033[0m Downloading %s\n' "$url"
-    curl -fL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --progress-bar -o "$tmp/$ASSET" "$url" ||
+    fetch() { curl -fL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --progress-bar -o "$tmp/$ASSET" "$1"; }
+    fetch "$url" || { [[ -n $alt ]] && url=$alt && printf '\033[1m==>\033[0m Trying %s\n' "$url" && fetch "$url"; } ||
         die "download failed: check the Pi's internet access and clock, then run the command again"
     head -c 2 "$tmp/$ASSET" | grep -q '^#!' || die "the download is not a NetKey installer: $url"
     # The installer checks its own payload checksum, so a damaged download stops there.
