@@ -43,6 +43,7 @@ STATUS_FILE = "status.json"
 LEASE_FILE = "leases"
 NM_CONF = "/etc/NetworkManager/conf.d/90-netkey-lan.conf"
 RETRO_PORT_FILE = "retro-port.json"     # state dir: MAC of the NIC last used as the retro port (kept off when disabled)
+EXTRA_PORTS_FILE = "extra-ports.json"   # state dir: MACs of extra wired adapters this box switched off
 ADOPT_MAX, ADOPT_WINDOW_S = 6, 120
 ADOPTED_FILE = "adopted.json"           # run dir (cleared at boot): ifindexes already moved into the namespace
 # NICs that stop delivering frames to the retro LAN (no errors, link fine) when moved into the namespace a second
@@ -115,8 +116,9 @@ def candidate_nics(sys_net="/sys/class/net", exclude=()):
     return out
 
 
-def choose_nic(configured, candidates, all_ifaces, exclude):
-    """(name, error). configured = "" (auto), "none" (no retro port), an interface name or a MAC. Never the WAN NIC."""
+def choose_nic(configured, candidates, all_ifaces, exclude, prefer=None):
+    """(name, error). configured = "" (auto), "none" (no retro port), an interface name or a MAC. Never the WAN NIC.
+    Auto with several adapters: the one used last time (prefer = its MAC), else the first by name."""
     configured = (configured or "").strip().lower()
     if configured == "none":
         return None, None
@@ -129,7 +131,7 @@ def choose_nic(configured, candidates, all_ifaces, exclude):
         return None, f"configured retro-LAN interface {configured} not found"
     if not candidates:
         return None, None
-    return candidates[0]["name"], None
+    return next((c["name"] for c in candidates if prefer and c["mac"] == prefer), candidates[0]["name"]), None
 
 
 def main_ruleset(cfg, share):
@@ -274,6 +276,7 @@ class LanDaemon:
         self.stats_since = None      # when the protocol counter table was created in the current namespace
         self.adopted_at = []         # recent namespace moves of the retro NIC (rebuild-loop guard)
         self.parked = set()          # retro port kept switched off while the LAN party port is disabled
+        self.extra = {}              # name -> MAC: wired adapters beyond the retro port, kept switched off
         self.rules_sig = None
         self.wg_text = None
         self.wg_addr = None
@@ -444,7 +447,8 @@ class LanDaemon:
                 return link["ifname"], mac, None
         exclude = self.default_ifaces() | self.uplink.exclude()
         main_ifaces = self.all_ifaces()
-        name, err = choose_nic(configured, candidate_nics(self.sys_net, exclude), main_ifaces, exclude)
+        last = (read_json(os.path.join(self.state_dir, RETRO_PORT_FILE), {}) or {}).get("mac")
+        name, err = choose_nic(configured, candidate_nics(self.sys_net, exclude), main_ifaces, exclude, last)
         return name, next((i["mac"] for i in main_ifaces if i["name"] == name), None), err
 
     def adopt_nic(self, name, mac, links):
@@ -1160,6 +1164,7 @@ class LanDaemon:
                             m.update(relay_port=port, relay_host=relay_host(e.get("relay_host")),
                                      relay_name=clean_relay(e.get("relay")))
                             log.info("lan: %s now relayed via %s", m["name"], m["relay_name"] or "the hub")
+                            d["relay_name"] = m["relay_name"]   # the hub moved the party to this relay too
                 elif t == "left":
                     for mid, m in list(d["members"].items()):
                         if m.get("box") == e.get("box"):
@@ -1436,6 +1441,44 @@ class LanDaemon:
         if mac and (read_json(path, {}) or {}).get("mac") != mac:
             write_json_atomic(path, {"mac": mac, "name": self.nic, "since": time.time()}, mode=0o640)
 
+    def park_extra_nics(self, keep, park=True):
+        """Wired adapters beyond the retro port (keep): down and away from NetworkManager. Otherwise NetworkManager
+        runs DHCP on them in the Pi's own network, and one cabled into the retro switch gets a lease from the party's
+        dnsmasq: retro PCs could then reach the web GUI and ssh, and the Pi could pick up a route via the party.
+        One that becomes the uplink or management port is handed back. park=False: only that hand-back."""
+        path = os.path.join(self.state_dir, EXTRA_PORTS_FILE)
+        pinned = set((read_json(path, {}) or {}).get("macs", []))
+        before = set(pinned)
+        exclude = self.default_ifaces() | self.uplink.exclude()
+        for i in self.all_ifaces():                   # handed back: it carries the uplink or the default route now
+            if i["mac"] in pinned and i["name"] in exclude:
+                pinned.discard(i["mac"])
+                self.unpin_nm(i["mac"])
+                self.run("ip", "link", "set", i["name"], "up", check=False)
+                log.info("lan: %s is the uplink now; no longer switched off", i["name"])
+        extra = {}
+        if park:
+            builtin = {self.uplink.eth} if self.uplink.eth else set()   # the built-in port: the uplink's business
+            extra = {c["name"]: c["mac"] for c in candidate_nics(self.sys_net, exclude | builtin) if c["name"] != keep}
+        for name, mac in extra.items():
+            flags = read_sys(os.path.join(self.sys_net, name, "flags"), "0x0")
+            if name in self.extra and not int(flags, 16) & 0x1:
+                continue                              # already off
+            if os.path.exists(os.path.join(self.sys_net, name, "device")):
+                self.pin_nm(mac)
+            if shutil.which("nmcli"):
+                self.run("nmcli", "device", "set", name, "managed", "no", check=False)
+            self.run("ip", "addr", "flush", "dev", name, check=False)
+            self.run("ip", "link", "set", name, "down", check=False)
+            if name not in self.extra:
+                log.warning("lan: extra Ethernet adapter %s (%s) switched off; only one retro-LAN port is used "
+                            "(%s). For more PCs, use a switch on the retro port", name, mac, keep or "none yet")
+            pinned.add(mac)
+        if park:
+            self.extra = extra
+        if pinned != before:
+            write_json_atomic(path, {"macs": sorted(pinned)}, mode=0o640)
+
     def park_retro_port(self):
         """LAN party port off: keep the last retro NIC down and away from NetworkManager, so retro PCs on it can't
         reach the Pi or (via IP forwarding) the home network. Never touches the uplink or the management port."""
@@ -1605,7 +1648,7 @@ class LanDaemon:
             "dhcp_range": [a["dhcp_first"], a["dhcp_last"]], "leases": leases,
             "rx_bytes": io.get("rx", {}).get("bytes", 0), "tx_bytes": io.get("tx", {}).get("bytes", 0),
             "party": {k: v for k, v in party.items() if k != "code"},
-            "net": self.uplink.status,
+            "net": self.uplink.status, "extra_nics": sorted(self.extra),
             "proto": self.proto_counters() if state == "up" else None, "proto_since": self.stats_since,
             "updated": time.time(), "pid": os.getpid(),
         }
@@ -1651,12 +1694,14 @@ class LanDaemon:
             if not self.watch_auto_port() and (self.built or self.ns_exists()):
                 self.teardown()
             self.park_retro_port()                 # a USB retro adapter (the built-in port is handled above)
+            self.park_extra_nics(None, park=False)
             self.write_status("disabled", "LAN party port is switched off", share)
             return
         self.parked.clear()                        # adopt_nic takes the port from here
         configured = (self.override_iface if self.override_iface is not None else lan["interface"]).strip().lower()
         self.uplink.port_tick(self.ns_links())
         name, mac, err = self.find_nic(configured, self.ns_links())
+        self.park_extra_nics(name, park=configured != "none")
         if err:
             if err != self.last_error:
                 log.warning("lan: %s", err)

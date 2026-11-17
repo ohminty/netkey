@@ -579,7 +579,7 @@ function renderChrome() {
   const banners = [];
   if (S.updated) banners.push(html`<div class="banner" role="status">${icon("reset")}<span><b>NetKey was updated on this box.</b> <span class="muted">Reload the page to use the new version.</span></span><button type="button" class="btn btn-sm btn-primary" data-action="reload-page">Reload</button></div>`);
   const up = st && st.update;
-  if (up && up.available && (up.required || updateDismissed() !== up.latest)) {
+  if (up && up.available && currentName === "dashboard" && (up.required || updateDismissed() !== up.latest)) {   // the Dashboard only
     banners.push(html`<div class="banner ${up.required ? "banner-warn" : ""}" role="status" data-key="upd-${up.latest}">${icon(up.required ? "alert" : "download")}<span><b>${up.required ? `Update required: NetKey ${up.latest}` : `NetKey ${up.latest} is available.`}</b> <span class="muted">${up.required ? `The cloud hub needs a newer version than ${up.current} for parties.` : `This box runs ${up.current}. Nothing updates by itself.`}</span></span>
       <button type="button" class="btn btn-sm btn-primary" data-action="update-howto">How to update</button>${up.required ? "" : html`<button type="button" class="btn btn-sm btn-ghost" data-action="update-later">Later</button>`}</div>`);
   }
@@ -1200,6 +1200,7 @@ const Lan = {
       body = html`
         ${lan.state === "error" || (lan.detail && lan.state === "stopped") ? html`<div class="banner ${lan.state === "error" ? "banner-err" : "banner-warn"} lan-banner" role="${lan.state === "error" ? "alert" : "status"}">${icon(lan.state === "error" ? "alert" : "info")}<span>${lan.detail || "Unknown error"}</span></div>` : ""}
         ${lan.state === "disabled" ? html`<p class="muted lan-note">Turn on <b>LAN party port</b> below to give retro PCs their own isolated network. While it is off, the retro-LAN port itself is switched off.</p>` : ""}
+        ${(lan.extra_nics || []).length ? html`<div class="banner banner-warn lan-banner" role="status">${icon("info")}<span><b>${lan.extra_nics.length === 1 ? "1 extra Ethernet adapter is" : `${lan.extra_nics.length} extra Ethernet adapters are`} switched off</b> (<span class="mono">${lan.extra_nics.join(", ")}</span>). <span class="muted">Only one adapter is used for the retro LAN${nic ? html` (<span class="mono">${nic.name}</span>)` : ""}. For more PCs, plug a switch into it. Unplug the extra ones: they still use power and USB bandwidth.</span></span></div>` : ""}
         <div class="lan-facts">
           ${nic ? html`${fact("Adapter", nic ? html`<span class="mono ellipsis" title="${nic.name}">${nic.name}</span>` : "—")}
           ${fact("MAC address", nic && nic.mac ? html`<span class="mono">${nic.mac}</span>` : "—")}
@@ -1774,7 +1775,12 @@ const Parties = {
     catch (e) { if (e.status !== 401) this.pub.err = e.message; }
     if (current === this) this.render();
   },
+  inSession(p = partyState()) { return !!p && !!p.role && p.role !== "standalone"; },
   async loadDir() {
+    if (this.inSession()) {                       // hidden while in a party: don't poll the hub for it
+      if (current === this && this.screen.name === "main") this.later("dir", 15000, () => this.loadDir());
+      return;
+    }
     try { this.dir = await api("/api/parties/directory"); this.dirErr = null; }
     catch (e) { if (e.status !== 401) this.dirErr = e.message; }
     if (current !== this) return;
@@ -1803,7 +1809,9 @@ const Parties = {
     if (this.screen.name === "listing") this.later("lst", 10000, () => this.loadListing());
   },
   async loadParty() {
+    const was = this.inSession();
     try { setParty(await api("/api/party")); } catch { /* the banners report a missing LAN service */ }
+    if (was && !this.inSession() && current === this && this.screen.name === "main") { this.loadDir(); this.loadMine(); }   // party over
     if (current === this) { this.partyChat(); this.render(); }
     this.later("party", 3000, () => this.loadParty());
   },
@@ -2222,12 +2230,13 @@ const Parties = {
     if (this.screen.name === "host") { patch(view, this.hostScreen(lan)); return; }
     const p = partyState();
     if (p && p.role === "host" && p.public && p.auto_approve != null && !(this.aa && this.aa.saving)) this.aa = { value: p.auto_approve, saving: false };
+    // in a party (hosting, joining or joined): the page is about that party; browsing comes back when it ends
+    const busy = this.inSession(p);
     patch(view, html`<div class="stack">
-      ${this.nickArea()}
+      ${busy ? "" : this.nickArea()}
       ${this.yourParty(lan, p)}
-      ${p && p.role === "standalone" ? this.myEvents() : ""}
-      ${this.directory()}
-      ${p && p.role !== "standalone" ? this.myEvents() : ""}
+      ${busy ? html`<p class="muted lan-note" data-key="dir-hidden">${icon("globe", "i-sm")} Public parties and your events come back here when this party ends.</p>`
+        : html`${this.myEvents()}${this.directory()}`}
     </div>`);
     const aa = $("#party-sw-auto", view);
     if (aa && this.aa) aa.checked = !!this.aa.value;
@@ -3618,6 +3627,7 @@ async function route() {
   view.innerHTML = "";
   window.scrollTo(0, 0);
   current.mount();
+  renderChrome();                                   // page-specific banners (the update notice)
 }
 window.addEventListener("hashchange", route);
 window.addEventListener("beforeunload", (e) => {
