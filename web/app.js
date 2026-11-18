@@ -1533,6 +1533,7 @@ const Lan = {
     const host = p && p.role === "host";
     patch(view, html`<div class="stack">
       ${this.hero(lan)}
+      ${ipClashBanner(lan)}
       ${this.toggles(lan)}
       ${this.partyTile(p)}
       ${this.leases(lan, p)}
@@ -2235,6 +2236,7 @@ const Parties = {
     patch(view, html`<div class="stack">
       ${busy ? "" : this.nickArea()}
       ${this.yourParty(lan, p)}
+      ${ipClashBanner(lan)}
       ${busy ? html`<p class="muted lan-note" data-key="dir-hidden">${icon("globe", "i-sm")} Public parties and your events come back here when this party ends.</p>`
         : html`${this.myEvents()}${this.directory()}`}
     </div>`);
@@ -3463,7 +3465,7 @@ const Settings = {
         <div class="fields">${items.map((s) => this.field(s))}</div></details>`;
     };
     // the "lan" and "network" groups are managed on the LAN and Uplink pages (immediate-save switches), not in the generic form
-    const known = new Set(cfg.schema.filter((s) => s.group === "mode" || s.group === "lan" || s.group === "network" || GROUPS.some((g) => g.match(s))).map((s) => s.key));
+    const known = new Set(cfg.schema.filter((s) => s.group === "mode" || s.group === "lan" || s.group === "network" || s.group === "share" || GROUPS.some((g) => g.match(s))).map((s) => s.key));
     const other = cfg.schema.filter((s) => !known.has(s.key));
     const hasLan = cfg.schema.some((s) => s.group === "lan");
     const hasNet = cfg.schema.some((s) => s.group === "network");
@@ -3472,6 +3474,7 @@ const Settings = {
       <a class="card lan-link" href="#/parties">${icon("users")}<span><b>Your public nickname and the public parties are on the Parties page</b><small>Choose a nickname there to join, chat and host public parties. Private parties never need one.</small></span>${icon("chevron", "chev")}</a>
       ${GROUPS.map(groupHtml)}
       ${other.length ? html`<section class="card"><div class="card-head"><h3>Other</h3></div><div class="fields">${other.map((s) => this.field(s))}</div></section>` : ""}
+      <a class="card lan-link" href="#/smb">${icon("folder")}<span><b>File sharing settings are on the Fileshare pages</b><small>Windows file sharing (workgroup), FTP and the web server each have their own page under Fileshare.</small></span>${icon("chevron", "chev")}</a>
       ${hasLan ? html`<a class="card lan-link" href="#/lan">${icon("ethernet")}<span><b>LAN port settings are on the LAN page</b><small>Retro-LAN port on/off, internet sharing and the LAN party (incl. auto-approve) apply immediately there.</small></span>${icon("chevron", "chev")}</a>` : ""}
       ${hasNet ? html`<a class="card lan-link" href="#/network">${icon("wifi")}<span><b>Uplink, Wi-Fi and rescue hotspot are on the Uplink page</b><small>Choose Ethernet or Wi-Fi, join a Wi-Fi network and manage the rescue hotspot there.</small></span>${icon("chevron", "chev")}</a>` : ""}
       <section class="card" aria-labelledby="h-net">
@@ -3600,7 +3603,422 @@ const Settings = {
 
 // router
 const view = $("#view");
-const ROUTES = { dashboard: Dashboard, modem: Lines, lan: Lan, parties: Parties, network: Network, users: Users, calls: Calls, settings: Settings };
+// two PCs on the retro LAN answering for one IP address (netkey-lan's scan); usually fixes itself within minutes
+function ipClashBanner(lan) {
+  const list = (lan && lan.ip_conflicts) || [];
+  if (!list.length) return "";
+  const pc = (p) => (p.name ? html`<b class="mono">${p.name}</b> <span class="faint mono">${p.mac}</span>` : html`<span class="mono">${p.mac}</span>`);
+  return html`<div class="banner banner-warn" role="status" data-key="ip-clash">${icon("alert")}<span>
+    <b>${list.length === 1 ? "Two PCs use the same IP address" : `${list.length} IP addresses are used by two PCs`}</b>
+    ${list.map((c) => html`<br><span class="mono">${c.ip}</span>: ${c.pcs.map((p, i) => html`${i ? " and " : ""}${pc(p)}`)}`)}
+    <br><span class="muted">TCP/IP between them fails (IPX and NetBEUI games are fine). It fixes itself within about 5 minutes, when the PCs renew their address. To fix it now, on one of them: Windows 95, 98, ME: Start › Run › <code>winipcfg</code> › Release, then Renew. Windows XP: <code>ipconfig /release</code>, then <code>ipconfig /renew</code>. Or restart the PC.</span></span></div>`;
+}
+
+// ---- file sharing: one folder for the retro LAN, over Windows sharing, FTP and the web (fileshare.py)
+const shareState = () => (S.status && S.status.lan && S.status.lan.fileshare) || null;
+const SHARE_SVC = {
+  smb: { route: "smb", title: "Windows file sharing", short: "LAN share", ic: "network", key: "share.smb" },
+  ftp: { route: "ftp", title: "FTP server", short: "FTP", ic: "swap", key: "share.ftp" },
+  web: { route: "web", title: "Web server", short: "Web", ic: "globe", key: "share.web" },
+};
+const shareAddr = (fsx, k) => {
+  const a = fsx && fsx.address ? fsx.address : "10.99.0.1", n = (fsx && fsx.name) || "NETKEY";
+  return k === "smb" ? `\\\\${n}\\${(fsx && fsx.share) || "FILES"}` : k === "ftp" ? `ftp://${a}` : `http://${a}/`;
+};
+// running / off / problem / paused, for a service tile or pill
+function shareSvcState(fsx, k) {
+  const s = fsx && fsx[k];
+  if (!fsx) return { cls: "pill-gray", text: "Unknown" };
+  if (s && !s.enabled) return { cls: "pill-gray", text: "Off" };
+  if (!fsx.active) return { cls: "pill-amber", text: "Paused" };
+  if (s && s.error) return { cls: "pill-red", text: "Problem" };
+  if (s && s.running) return { cls: "pill-green", text: "On" };
+  return { cls: "pill-amber", text: "Starting" };
+}
+const sharePausedBanner = (fsx) => (fsx && !fsx.active && fsx.paused
+  ? html`<div class="banner banner-warn" role="status" data-key="share-paused">${icon("info")}<span><b>File sharing is paused.</b> <span class="muted">${fsx.paused}</span></span></div>` : "");
+
+// settings switches shared by the three service pages (saved at once, like the LAN page)
+const ShareSettings = {
+  async loadCfg() {
+    try { const c = await api("/api/settings"); if (current === this) { this.cfg = c.values; this.render(); } }
+    catch (e) { if (e.status !== 401) toastErr(e, "Could not load the settings"); }
+  },
+  val(k) { return this.opt && k in this.opt ? this.opt[k] : this.cfg ? this.cfg[k] : undefined; },
+  async saveKey(k, v, okMsg) {
+    this.opt = this.opt || {};
+    this.opt[k] = v; this.saving = k; this.render();
+    try {
+      const c = await api("/api/settings", { method: "PUT", body: { values: { [k]: v } } });
+      this.cfg = c.values;
+      toast(okMsg, { detail: "The box applies it within a few seconds." });
+      refreshStatus();
+      return true;
+    } catch (e) { toastErr(e, "Could not save"); return false; }
+    finally { delete this.opt[k]; this.saving = null; if (current === this) this.render(); }
+  },
+  switchCard(k, title, text) {
+    const on = !!this.val(k), svc = Object.keys(SHARE_SVC).find((x) => SHARE_SVC[x].key === k);
+    const st = svc ? shareSvcState(shareState(), svc) : null;
+    return html`<div class="card lan-toggle ${on ? "is-on" : ""}" data-key="sw-${k}">
+      <label class="lan-toggle-main" for="sw-${k.replace(".", "-")}">
+        <span class="lt-icon">${icon(svc ? SHARE_SVC[svc].ic : "settings")}</span>
+        <span class="lt-text"><b>${title} ${st && on ? html`<span class="pill ${st.cls}">${st.text}</span>` : ""}</b><small>${text}</small></span>
+        <span class="switch"><input type="checkbox" id="sw-${k.replace(".", "-")}" data-change="share-switch" data-key="${k}" ${on ? raw("checked") : ""} ${this.cfg && this.saving !== k ? "" : raw("disabled")}><span class="switch-track"></span></span>
+      </label></div>`;
+  },
+  svcError(k) {
+    const s = shareState() && shareState()[k];
+    return s && s.enabled && s.error ? html`<div class="banner banner-err" role="alert" data-key="err-${k}">${icon("alert")}<span>${s.error}</span></div>` : "";
+  },
+  actions: {
+    async "share-switch"(input) {
+      const k = input.dataset.key, on = input.checked;
+      const names = { "share.smb": "Windows file sharing", "share.ftp": "FTP server", "share.web": "Web server", "share.writable": "Changing files from PCs" };
+      await this.saveKey(k, on, `${names[k] || k} ${on ? "turned on" : "turned off"}`);
+    },
+    "copy-addr"(el) { copyText(el.dataset.text).then((ok) => toast(ok ? "Copied" : "Could not copy", { type: ok ? "ok" : "err", detail: el.dataset.text })); },
+  },
+};
+const addrBox = (label, text) => html`<div class="share-addr"><small>${label}</small><span><code class="mono">${text}</code>
+  <button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="copy-addr" data-text="${text}" aria-label="Copy ${text}" title="Copy">${icon("copy")}</button></span></div>`;
+const howTo = (title, steps) => html`<section class="card card-pad share-howto"><h3>${title}</h3>${steps}</section>`;
+
+const ShareSmb = {
+  title: "Windows file sharing",
+  ...ShareSettings,
+  mount() { this.cfg = null; this.opt = {}; this.render(); this.loadCfg(); },
+  update() { this.render(); },
+  render() {
+    const fsx = shareState(), wg = this.wgDraft != null ? this.wgDraft : (this.val("share.workgroup") || "WORKGROUP");
+    const name = (fsx && fsx.name) || "NETKEY";
+    patch(view, html`<div class="stack">
+      ${sharePausedBanner(fsx)}${this.svcError("smb")}
+      <section class="grid grid-2 lan-toggles">
+        ${this.switchCard("share.smb", "Windows file sharing", "The shared folder appears in Network Neighborhood on the retro LAN. No password.")}
+        ${this.switchCard("share.writable", "PCs can change files", this.val("share.writable") ? "PCs may add, change and delete files in the share." : "Read only: PCs can open and copy files, not change them.")}
+      </section>
+      <section class="card card-pad" data-key="smb-ids">
+        <div class="share-addrs">${addrBox("Share", shareAddr(fsx, "smb"))}${addrBox("Computer name", name)}${addrBox("By address", `\\\\${(fsx && fsx.address) || "10.99.0.1"}\\FILES`)}</div>
+        <form class="share-wg" data-submit="wg-save" autocomplete="off">
+          <label class="field"><span class="field-label">Workgroup</span>
+            <input class="input mono" id="wg-in" data-input="wg-input" maxlength="15" value="${wg}" spellcheck="false" autocapitalize="characters"></label>
+          <button class="btn" ${this.cfg && wg.toUpperCase() !== (this.cfg["share.workgroup"] || "") ? "" : raw("disabled")}>Save</button>
+          <p class="faint">Use the same workgroup as the retro PCs (Control Panel › Network › Identification), so the box shows up next to them. Most PCs use WORKGROUP.</p>
+        </form>
+      </section>
+      <div class="grid grid-2">
+        ${howTo("Windows 95, 98, ME", html`<ol><li>The PC needs <b>TCP/IP</b> (obtain an address automatically) and <b>Client for Microsoft Networks</b> in Control Panel › Network.</li>
+          <li>Open <b>Network Neighborhood</b>, then <b class="mono">${name}</b>, then <b>FILES</b>.</li>
+          <li>Not listed yet? Browsing takes a few minutes to settle. Use Start › Find › Computer › <b class="mono">${name}</b>, or Start › Run › <code class="mono">${shareAddr(fsx, "smb")}</code>.</li></ol>`)}
+        ${howTo("Windows for Workgroups 3.11, XP and DOS", html`<ul><li><b>WfW 3.11</b> with Microsoft TCP/IP-32: File Manager › Disk › Connect Network Drive › <code class="mono">${shareAddr(fsx, "smb")}</code>.</li>
+          <li><b>Windows XP</b>: My Network Places, or <code class="mono">${shareAddr(fsx, "smb")}</code> in the address bar.</li>
+          <li><b>DOS</b> with Microsoft Network Client 3.0 (TCP/IP): <code class="mono">NET USE F: ${shareAddr(fsx, "smb")}</code></li>
+          <li>Only TCP/IP works for the share; NetBEUI alone is not enough (games can keep using IPX and NetBEUI).</li></ul>`)}
+      </div>
+      <p class="muted lan-note">${icon("lock", "i-sm")} Only PCs on this box's own retro LAN can reach the share. Your home network can't, and while you host a party, the other boxes' PCs can't either.</p>
+    </div>`);
+  },
+  actions: {
+    ...ShareSettings.actions,
+    "wg-input"(input) { this.wgDraft = input.value.toUpperCase().replace(/[^A-Z0-9_-]/g, ""); if (input.value !== this.wgDraft) input.value = this.wgDraft; this.render(); },
+    async "wg-save"() {
+      const v = (this.wgDraft || "").trim();
+      if (!v) return toast("Enter a workgroup name", { type: "err" });
+      if (await this.saveKey("share.workgroup", v, `Workgroup set to ${v}`)) this.wgDraft = null;
+      this.render();
+    },
+  },
+};
+
+const ShareFtp = {
+  title: "FTP server",
+  ...ShareSettings,
+  mount() { this.cfg = null; this.opt = {}; this.users = null; this.render(); this.loadCfg(); this.loadUsers(); },
+  update() { this.render(); },
+  async loadUsers() { try { this.users = (await api("/api/users")).users; if (current === this) this.render(); } catch { /* count stays hidden */ } },
+  render() {
+    const fsx = shareState(), a = (fsx && fsx.address) || "10.99.0.1";
+    const n = this.users ? this.users.filter((u) => u.enabled).length : null;
+    patch(view, html`<div class="stack">
+      ${sharePausedBanner(fsx)}${this.svcError("ftp")}
+      ${this.switchCard("share.ftp", "FTP server", "PCs log in with a modem user's name and password, and can upload, download and organise files.")}
+      <section class="card card-pad" data-key="ftp-ids">
+        <div class="share-addrs">${addrBox("Address", `ftp://${a}`)}${addrBox("Or by name", "ftp netkey")}</div>
+        <a class="card lan-link" href="#/users">${icon("users")}<span><b>Logins are your modem users${n != null ? ` (${n} enabled)` : ""}</b><small>The same names and passwords as for dial-up. Add or change them on the Users page.</small></span>${icon("chevron", "chev")}</a>
+      </section>
+      <div class="grid grid-2">
+        ${howTo("DOS", html`<ul><li>With a packet driver loaded, <b>mTCP</b>'s FTP client works well: <code class="mono">FTP ${a}</code></li>
+          <li>Type <code class="mono">bin</code> before transferring programs or archives, then <code class="mono">get FILE.ZIP</code> or <code class="mono">put FILE.ZIP</code>.</li></ul>`)}
+        ${howTo("Windows", html`<ul><li>The built-in client: Start › Run › <code class="mono">ftp ${a}</code>, then <code class="mono">bin</code> and <code class="mono">get</code> / <code class="mono">put</code>.</li>
+          <li>Or WS_FTP, CuteFTP, or a browser: <code class="mono">ftp://USER@${a}/</code></li>
+          <li>Passive and active mode both work.</li></ul>`)}
+      </div>
+    </div>`);
+  },
+  actions: { ...ShareSettings.actions },
+};
+
+const ShareWeb = {
+  title: "Web server",
+  ...ShareSettings,
+  mount() { this.cfg = null; this.opt = {}; this.render(); this.loadCfg(); },
+  update() { this.render(); },
+  render() {
+    const fsx = shareState(), a = (fsx && fsx.address) || "10.99.0.1";
+    patch(view, html`<div class="stack">
+      ${sharePausedBanner(fsx)}${this.svcError("web")}
+      ${this.switchCard("share.web", "Web server", "A plain page with the shared folder that any browser can download from. Read only.")}
+      <section class="card card-pad" data-key="web-ids"><div class="share-addrs">${addrBox("Address", `http://${a}/`)}${addrBox("Or by name", "http://netkey/")}</div></section>
+      ${howTo("Old browsers welcome", html`<ul><li>The page is simple HTML 3.2 without scripts or styles, so Mosaic, Netscape 1 to 4, Internet Explorer 2 to 6 and Arachne all show it.</li>
+        <li>Click a file to download it. Uploads go through this NetKey page (Fileshare), or over FTP and Windows file sharing.</li></ul>`)}
+    </div>`);
+  },
+  actions: { ...ShareSettings.actions },
+};
+
+// the file browser: what's in the shared folder, uploads by drag and drop (files and whole folders)
+const Files = {
+  title: "Fileshare",
+  mount() {
+    this.path = this.path || "";
+    this.data = null; this.err = null;
+    this.ups = []; this.drag = 0;
+    this.render();
+    this.load();
+    this.onDrag = (e) => this.dragEvent(e);
+    ["dragenter", "dragover", "dragleave", "drop"].forEach((t) => document.addEventListener(t, this.onDrag));
+  },
+  unmount() { clearTimeout(this.timer); ["dragenter", "dragover", "dragleave", "drop"].forEach((t) => document.removeEventListener(t, this.onDrag)); },
+  update() { this.render(); },
+  onVisible() { this.load(); },
+  async load() {
+    clearTimeout(this.timer);
+    const want = this.path;
+    try {
+      const d = await api(`/api/files?path=${encodeURIComponent(want)}`);
+      if (want !== this.path) return;
+      this.data = d; this.err = null;
+    } catch (e) {
+      if (e.status === 401) return;
+      if (e.status === 404 && this.path) { this.path = ""; return this.load(); }
+      this.err = e.message;
+    }
+    if (current !== this) return;
+    this.render();
+    this.timer = setTimeout(() => { if (!document.hidden && !this.ups.some((u) => u.state === "up")) this.load(); else this.timer = setTimeout(() => this.load(), 5000); }, 5000);
+  },
+  go(path) { this.path = path; this.data = null; this.render(); this.load(); },
+  rel(name) { return this.path ? `${this.path}/${name}` : name; },
+  services(fsx) {
+    return html`<section class="share-svcs" aria-label="How the PCs get the files">${Object.entries(SHARE_SVC).map(([k, s]) => {
+      const st = shareSvcState(fsx, k);
+      return html`<a class="card share-svc" href="#/${s.route}" data-key="svc-${k}"><span class="lt-icon">${icon(s.ic)}</span>
+        <span class="ss-t"><b>${s.short}</b><code class="mono ellipsis">${shareAddr(fsx, k)}</code></span><span class="pill ${st.cls}">${st.text}</span></a>`;
+    })}</section>`;
+  },
+  crumbs() {
+    const parts = this.path ? this.path.split("/") : [];
+    const items = [html`<button type="button" class="crumb" data-action="files-go" data-path="" data-drop-dir="">${icon("home", "i-sm")}Files</button>`];
+    parts.forEach((p, i) => {
+      const to = parts.slice(0, i + 1).join("/");
+      items.push(html`<span class="crumb-sep">/</span>`);
+      items.push(i === parts.length - 1 ? html`<span class="crumb is-here">${p}</span>`
+        : html`<button type="button" class="crumb" data-action="files-go" data-path="${to}" data-drop-dir="${to}">${p}</button>`);
+    });
+    return html`<nav class="crumbs" aria-label="Folder">${items}</nav>`;
+  },
+  uploadsCard() {
+    if (!this.ups.length) return "";
+    const done = this.ups.filter((u) => u.state === "done").length, failed = this.ups.filter((u) => u.state === "err").length;
+    const total = this.ups.reduce((a, u) => a + u.size, 0), sent = this.ups.reduce((a, u) => a + (u.state === "done" ? u.size : u.sent), 0);
+    const active = this.ups.some((u) => u.state === "up" || u.state === "wait");
+    const shown = this.ups.filter((u) => u.state !== "done").slice(0, 6);
+    return html`<section class="card card-pad uploads" data-key="uploads" aria-live="polite">
+      <div class="up-head"><b>${active ? `Uploading ${done + 1 > this.ups.length ? this.ups.length : done + (active ? 1 : 0)} of ${this.ups.length}` : failed ? `${done} uploaded, ${failed} failed` : `${done} file${done === 1 ? "" : "s"} uploaded`}</b>
+        <span class="faint tnum">${fmtBytes(sent)} of ${fmtBytes(total)}</span><span class="spacer"></span>
+        ${active ? html`<button type="button" class="btn btn-sm" data-action="files-cancel">Cancel</button>` : html`<button type="button" class="btn btn-ghost btn-sm" data-action="files-clear-ups">Dismiss</button>`}</div>
+      <div class="bar"><span style="width:${total ? Math.round((sent / total) * 100) : 0}%"></span></div>
+      ${shown.length ? html`<ul class="up-list">${shown.map((u) => html`<li class="${u.state === "err" ? "bad" : ""}"><span class="ellipsis mono">${u.name}</span>
+        <span class="faint nowrap">${u.state === "err" ? u.error : u.state === "wait" ? "waiting" : `${Math.round((u.sent / (u.size || 1)) * 100)} %`}</span></li>`)}</ul>` : ""}
+    </section>`;
+  },
+  render() {
+    const fsx = shareState(), d = this.data;
+    const free = d ? Math.max(0, d.free - d.reserve) : null;
+    const row = (e) => {
+      const rel = this.rel(e.name);
+      return html`<tr data-key="f-${e.name}" draggable="true" data-drag="${rel}" ${e.dir ? html`data-drop-dir="${rel}"` : ""} class="${e.dir ? "is-dir" : ""}">
+        <td><div class="cell-user">${e.dir ? html`<button type="button" class="file-name" data-action="files-go" data-path="${rel}"><span class="pc-ic is-folder">${icon("folder")}</span><b>${e.name}</b></button>`
+          : html`<a class="file-name" href="/api/files/download?path=${encodeURIComponent(rel)}" download><span class="pc-ic">${icon("file")}</span><span>${e.name}</span></a>`}</div></td>
+        <td class="r nowrap tnum hide-sm">${e.dir ? "" : fmtBytes(e.size)}</td>
+        <td class="nowrap hide-sm">${relTime(e.mtime)}</td>
+        <td class="keep"><div class="actions">
+          ${e.dir ? "" : html`<a class="btn btn-ghost btn-icon btn-sm" href="/api/files/download?path=${encodeURIComponent(rel)}" download aria-label="Download ${e.name}" title="Download">${icon("download")}</a>`}
+          <button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="files-rename" data-name="${e.name}" aria-label="Rename ${e.name}" title="Rename">${icon("edit")}</button>
+          <button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="files-delete" data-name="${e.name}" data-dir="${e.dir ? "1" : ""}" aria-label="Delete ${e.name}" title="Delete">${icon("trash")}</button>
+        </div></td></tr>`;
+    };
+    patch(view, html`<div class="stack">
+      ${sharePausedBanner(fsx)}
+      ${this.services(fsx)}
+      ${this.uploadsCard()}
+      <section class="card files-card ${this.drag ? "is-drop" : ""}" data-key="files">
+        <div class="card-head files-head">${this.crumbs()}<span class="spacer"></span>
+          <button type="button" class="btn btn-sm" data-action="files-mkdir">${icon("plus")}New folder</button>
+          <label class="btn btn-sm">${icon("folder")}Upload folder<input type="file" class="sr-only" data-change="files-pick" webkitdirectory multiple></label>
+          <label class="btn btn-primary btn-sm">${icon("up")}Upload files<input type="file" class="sr-only" data-change="files-pick" multiple></label></div>
+        ${d == null ? (this.err ? emptyState("alert", "Could not open the shared folder", this.err, html`<button class="btn" data-action="files-reload">Retry</button>`) : html`<table class="table"><tbody>${skelRows(3, 4)}</tbody></table>`)
+          : !d.entries.length ? emptyState("folder", this.path ? "This folder is empty" : "Nothing shared yet", "Drag files or whole folders here, or use Upload. The PCs on the retro LAN can get them right away.")
+          : html`<div class="table-wrap"><table class="table files-table"><thead><tr><th>Name</th><th class="r hide-sm">Size</th><th class="hide-sm">Modified</th><th class="r"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody>${this.path ? html`<tr data-key="f-up" data-drop-dir="${this.path.split("/").slice(0, -1).join("/")}"><td colspan="4"><button type="button" class="file-name" data-action="files-go" data-path="${this.path.split("/").slice(0, -1).join("/")}"><span class="pc-ic is-folder">${icon("folder")}</span><span class="muted">..  (up one folder)</span></button></td></tr>` : ""}${d.entries.map(row)}</tbody></table></div>`}
+        <div class="drop-hint" aria-hidden="true">${icon("up")}<b>Drop to upload into ${this.path ? `/${this.path}` : "the shared folder"}</b></div>
+        ${d ? html`<p class="card-note">${icon("database", "i-sm")}${fmtBytes(free)} free for uploads on the memory card · drag a row onto a folder to move it</p>` : ""}
+      </section>
+    </div>`);
+  },
+  // drag and drop: files from the computer upload; a row dragged onto a folder (or a breadcrumb) moves
+  dragEvent(e) {
+    const files = e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+    const target = e.target.closest && e.target.closest("[data-drop-dir]");
+    if (!files) {
+      if (!this.dragRow) return;
+      if (e.type === "dragover" && target && target.dataset.dropDir !== this.dragRow) { e.preventDefault(); $$(".drop-on", view).forEach((x) => x !== target && x.classList.remove("drop-on")); target.classList.add("drop-on"); }
+      if (e.type === "dragleave" && target) target.classList.remove("drop-on");
+      if (e.type === "drop" && target) { e.preventDefault(); const from = this.dragRow; this.dragRow = null; this.move(from, target.dataset.dropDir); }
+      return;
+    }
+    if (current !== this) return;
+    e.preventDefault();
+    if (e.type === "dragenter") { this.drag++; if (this.drag === 1) this.render(); }
+    else if (e.type === "dragleave") { this.drag = Math.max(0, this.drag - 1); if (!this.drag) this.render(); }
+    else if (e.type === "drop") { this.drag = 0; this.render(); this.dropped(e.dataTransfer); }
+  },
+  async dropped(dt) {
+    const items = [...(dt.items || [])].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+    if (!items.length) return this.queue([...dt.files].map((f) => ({ file: f, rel: f.name })));
+    const out = [];
+    const walk = async (entry, prefix) => {
+      if (entry.isFile) { const f = await new Promise((res, rej) => entry.file(res, rej)); out.push({ file: f, rel: prefix + f.name }); return; }
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const x of batch) await walk(x, `${prefix}${entry.name}/`);
+      }
+    };
+    try { for (const it of items) await walk(it, ""); } catch (e) { toastErr(e, "Could not read the dropped folder"); }
+    this.queue(out);
+  },
+  async queue(list) {
+    list = list.filter((x) => !x.rel.split("/").some((p) => p.startsWith(".")));        // .DS_Store and friends
+    if (!list.length) return;
+    const names = new Set((this.data ? this.data.entries : []).map((e) => e.name.toLowerCase()));
+    const clash = [...new Set(list.map((x) => x.rel.split("/")[0]).filter((n) => names.has(n.toLowerCase())))];
+    let overwrite = false;
+    if (clash.length) {
+      overwrite = await confirmDialog({ title: "Replace existing files?", message: `${clash.length === 1 ? `“${clash[0]}” is` : `${clash.length} items are`} already in this folder. Uploading replaces files with the same name.`, confirmText: "Replace" });
+      if (!overwrite) return;
+    }
+    const size = list.reduce((a, x) => a + x.file.size, 0);
+    if (this.data && size > this.data.free - this.data.reserve) return toast("Not enough space on the memory card", { type: "err", detail: `${fmtBytes(size)} to upload, ${fmtBytes(Math.max(0, this.data.free - this.data.reserve))} free.` });
+    if (!this.ups.some((u) => u.state === "up" || u.state === "wait")) this.ups = [];
+    const dir = this.path;
+    list.forEach((x) => this.ups.push({ file: x.file, name: x.rel, dir, size: x.file.size, sent: 0, state: "wait", overwrite }));
+    this.render();
+    this.pump();
+  },
+  pump() {
+    const running = this.ups.filter((u) => u.state === "up").length;
+    const next = this.ups.filter((u) => u.state === "wait").slice(0, 2 - running);
+    next.forEach((u) => this.send(u));
+    if (!running && !next.length && this.ups.length) { this.load(); const ok = this.ups.filter((u) => u.state === "done").length; if (ok) toast(`${ok} file${ok === 1 ? "" : "s"} uploaded`, { detail: "The retro PCs can get them now." }); }
+  },
+  send(u) {
+    u.state = "up";
+    const x = new XMLHttpRequest();
+    u.xhr = x;
+    x.open("PUT", `/api/files/upload?path=${encodeURIComponent(u.dir)}&name=${encodeURIComponent(u.name)}${u.overwrite ? "&overwrite=1" : ""}`);
+    x.setRequestHeader("X-Requested-With", "netkey");
+    x.setRequestHeader("Content-Type", "application/octet-stream");
+    let last = 0;
+    x.upload.onprogress = (e) => { u.sent = e.loaded; if (Date.now() - last > 250 && current === this) { last = Date.now(); this.render(); } };
+    x.onload = () => {
+      let msg = "";
+      try { msg = JSON.parse(x.responseText).error || ""; } catch { /* not JSON */ }
+      if (x.status === 401) onUnauthorized();
+      if (x.status >= 200 && x.status < 300) { u.state = "done"; u.sent = u.size; } else { u.state = "err"; u.error = msg || `HTTP ${x.status}`; }
+      this.after();
+    };
+    x.onerror = () => { u.state = "err"; u.error = "connection lost"; this.after(); };
+    x.onabort = () => { u.state = "err"; u.error = "cancelled"; this.after(); };
+    x.send(u.file);
+  },
+  after() { if (current === this) this.render(); this.pump(); },
+  async move(from, to) {
+    if (from == null || to == null) return;
+    try {
+      await api("/api/files/move", { method: "POST", body: { paths: [from], to } });
+      toast(`Moved ${from.split("/").pop()}`, { detail: `to ${to ? "/" + to : "the top folder"}` });
+    } catch (e) { toastErr(e, "Could not move it"); }
+    this.load();
+  },
+  actions: {
+    "files-go"(el) { this.go(el.dataset.path || ""); },
+    "files-reload"() { this.err = null; this.load(); },
+    "files-pick"(input) {
+      const list = [...input.files].map((f) => ({ file: f, rel: f.webkitRelativePath || f.name }));
+      input.value = "";
+      this.queue(list);
+    },
+    "files-cancel"() { this.ups.forEach((u) => { if (u.state === "wait") { u.state = "err"; u.error = "cancelled"; } if (u.state === "up" && u.xhr) u.xhr.abort(); }); },
+    "files-clear-ups"() { this.ups = []; this.render(); },
+    "files-mkdir"() {
+      openModal({
+        title: "New folder", iconName: "folder",
+        body: html`<label class="field"><span class="field-label">Name</span><input class="input" name="name" maxlength="120" autocomplete="off" placeholder="e.g. GAMES"></label>
+          <p class="faint">Short names in capitals (8 letters or fewer) are easiest to use from DOS.</p>`,
+        foot: html`<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn btn-primary">Create</button>`,
+        onSubmit: async (form) => {
+          await api("/api/files/mkdir", { method: "POST", body: { path: this.path, name: form.name.value.trim() } });
+          this.load();
+        },
+      });
+    },
+    "files-rename"(el) {
+      const old = el.dataset.name;
+      openModal({
+        title: `Rename ${old}`, iconName: "edit",
+        body: html`<label class="field"><span class="field-label">New name</span><input class="input" name="name" maxlength="120" autocomplete="off" value="${old}"></label>`,
+        foot: html`<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn btn-primary">Rename</button>`,
+        onSubmit: async (form) => {
+          const to = form.name.value.trim();
+          if (to === old) return;
+          await api("/api/files/rename", { method: "POST", body: { path: this.rel(old), to } });
+          this.load();
+        },
+      });
+    },
+    async "files-delete"(el) {
+      const name = el.dataset.name, dir = el.dataset.dir === "1";
+      if (!(await confirmDialog({ title: `Delete ${name}?`, message: dir ? "The folder and everything in it are deleted from the box. This can't be undone." : "The file is deleted from the box. This can't be undone.", confirmText: "Delete", danger: true }))) return;
+      try { await api("/api/files/delete", { method: "POST", body: { paths: [this.rel(name)] } }); toast(`Deleted ${name}`); }
+      catch (e) { toastErr(e, "Could not delete it"); }
+      this.load();
+    },
+  },
+};
+document.addEventListener("dragstart", (e) => {
+  const tr = e.target.closest && e.target.closest("[data-drag]");
+  if (!tr || current !== Files) return;
+  Files.dragRow = tr.dataset.drag;
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", tr.dataset.drag);
+});
+document.addEventListener("dragend", () => { Files.dragRow = null; $$(".drop-on", view).forEach((x) => x.classList.remove("drop-on")); });
+
+const ROUTES = { dashboard: Dashboard, modem: Lines, lan: Lan, parties: Parties, network: Network, users: Users, calls: Calls, settings: Settings,
+  files: Files, smb: ShareSmb, ftp: ShareFtp, web: ShareWeb };
 let current = null, currentName = null, routing = false;
 
 async function route() {
@@ -3621,7 +4039,9 @@ async function route() {
   currentName = name;
   $$("[data-route]").forEach((a) => (a.dataset.route === name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
   $("#subnav").hidden = !["modem", "users", "calls"].includes(name);       // the modem's pages, as tabs on phones
+  $("#subnav-files").hidden = !["files", "smb", "ftp", "web"].includes(name);
   if (name === "users" || name === "calls") $$('#tabbar [data-route="modem"]').forEach((t) => t.setAttribute("aria-current", "page"));
+  if (["smb", "ftp", "web"].includes(name)) $$('#nav [data-route="files"], #tabbar [data-route="files"]').forEach((t) => t.setAttribute("aria-current", "page"));
   $("#page-title").textContent = current.title;
   document.title = `${current.title} · NetKey${S.session && S.session.hostname ? " · " + S.session.hostname : ""}`;
   view.innerHTML = "";

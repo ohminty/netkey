@@ -202,11 +202,21 @@ def guard_ruleset(cfg, gateway, member_ids, role):
             lines += [f'        iifname "{vx_name(m)}" ether saddr @macs_m{m} return',
                       f'        iifname "{vx_name(m)}" add @macs_m{m} {{ ether saddr }} return',
                       f'        iifname "{vx_name(m)}" counter drop']
+    # the host's file share is for its own retro LAN: PCs of other boxes in the party can't reach it, and its
+    # Network Neighborhood announcements stay home (NetBIOS between the party PCs themselves still flows)
+    from .fileshare import PASV_PORTS, TCP_PORTS, UDP_PORTS
+    tcp = ", ".join(map(str, TCP_PORTS)) + f", {PASV_PORTS[0]}-{PASV_PORTS[1]}"
+    udp = ", ".join(map(str, UDP_PORTS))
     lines += ["    }",
               "    chain forward {", "        type filter hook forward priority filter; policy accept;",
               "        jump guard", "    }",
               "    chain input {", "        type filter hook input priority filter; policy accept;",
-              "        jump guard", "    }", "}"]
+              f'        iifname "vx-*" tcp dport {{ {tcp} }} counter drop',
+              f'        iifname "vx-*" udp dport {{ {udp} }} counter drop',
+              "        jump guard", "    }",
+              "    chain output {", "        type filter hook output priority filter; policy accept;",
+              f'        oifname "vx-*" ip saddr {gateway} udp sport {{ {udp} }} counter drop',
+              "    }", "}"]
     return "\n".join(lines) + "\n"
 
 

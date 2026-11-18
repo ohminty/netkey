@@ -937,7 +937,7 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
   .banners { padding: 12px 16px 0; }
   .view { padding: 16px 16px calc(90px + env(safe-area-inset-bottom)); }
   .tabbar {
-    display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
     padding: 6px 6px calc(6px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border);
     background: var(--bg-2);
   }
@@ -1322,3 +1322,54 @@ a.kpi-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px
 .upd-cmd code { flex: 1; min-width: 0; font-size: 12.5px; overflow-wrap: anywhere; user-select: all; }
 .upd-h { margin: 14px 0 6px; font-size: 13px; }
 .upd-notes { margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); white-space: pre-wrap; font: 12.5px/1.5 var(--mono, ui-monospace, monospace); max-height: 240px; overflow: auto; }
+
+/* fileshare */
+.share-svcs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.share-svc { display: flex; align-items: center; gap: 12px; padding: 14px 16px; color: var(--text-2); min-width: 0; }
+.share-svc:hover { text-decoration: none; border-color: var(--border-2); background: var(--surface-2); }
+.share-svc .ss-t { flex: 1; display: grid; min-width: 0; }
+.share-svc .ss-t b { color: var(--text); font-size: 13.5px; }
+.share-svc code { font-size: 12px; color: var(--text-3); }
+.files-head { gap: 8px; }
+.files-head .btn input { display: none; }
+.crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; font-size: 14px; }
+.crumb { border: 0; background: none; padding: 4px 6px; border-radius: 6px; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.crumb:hover { background: var(--surface-2); }
+.crumb.is-here { color: var(--text); cursor: default; }
+.crumb.is-here:hover { background: none; }
+.crumb-sep { color: var(--text-3); }
+.file-name { display: inline-flex; align-items: center; gap: 10px; border: 0; background: none; padding: 0; font: inherit; color: var(--text); cursor: pointer; text-align: left; min-width: 0; overflow-wrap: anywhere; }
+a.file-name:hover, button.file-name:hover b { text-decoration: underline; }
+.pc-ic.is-folder { color: var(--accent); }
+.files-table tr[draggable="true"] { cursor: grab; }
+.files-table tr.drop-on td, .crumb.drop-on { background: var(--accent-soft); }
+.files-card { position: relative; }
+.drop-hint { display: none; position: absolute; inset: 0; border: 2px dashed var(--accent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--accent-soft) 85%, transparent); place-items: center; align-content: center; gap: 8px; color: var(--accent); z-index: 2; pointer-events: none; }
+.drop-hint .i { width: 28px; height: 28px; }
+.files-card.is-drop .drop-hint { display: grid; }
+.uploads .up-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.uploads .bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.uploads .bar span { display: block; height: 100%; background: var(--accent); transition: width .25s; }
+.up-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; font-size: 12.5px; }
+.up-list li { display: flex; gap: 12px; justify-content: space-between; min-width: 0; }
+.up-list li.bad { color: var(--red, #c0392b); }
+.share-addrs { display: flex; flex-wrap: wrap; gap: 10px 28px; }
+.share-addr { display: grid; gap: 2px; min-width: 0; }
+.share-addr small { color: var(--text-3); font-size: 12px; }
+.share-addr > span { display: flex; align-items: center; gap: 4px; }
+.share-addr code { font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+.share-wg { display: grid; grid-template-columns: minmax(0, 220px) auto; align-items: end; gap: 8px 10px; margin-top: 16px; }
+.share-wg p { grid-column: 1 / -1; margin: 0; font-size: 12.5px; }
+.share-wg .btn { justify-self: start; }
+.share-howto h3 { font-size: 14px; margin: 0 0 8px; }
+.share-howto ol, .share-howto ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--text-2); font-size: 13px; }
+.lan-toggle-main .lt-text b .pill { margin-left: 6px; vertical-align: 1px; }
+#ftp-ids .lan-link, [data-key="ftp-ids"] .lan-link { margin-top: 14px; }
+@media (max-width: 720px) {
+  .share-svcs { grid-template-columns: 1fr; }
+  .files-head .crumbs { flex-basis: 100%; }
+}
+@media (max-width: 720px) {
+  .share-svcs { gap: 8px; }
+  .share-svc { padding: 10px 14px; }
+}

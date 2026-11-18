@@ -86,3 +86,8 @@ NetKey is free for personal and other noncommercial use under the
 building it into a product or service. Get in touch at **[support@netkey.no](mailto:support@netkey.no)** and we'll work something out.
 
 NetKey's cloud service (the hub and relay servers behind cloud parties) is not part of this repository.
+
+**What the box tells the cloud hub about itself:** while you use its web page, the box asks the hub every few hours
+whether a newer NetKey is out. That question carries the box's ID, its name, its NetKey version and its hardware (Raspberry Pi
+model, operating system, processor type, memory size, and which chip the retro LAN adapter has). The hub keeps them
+to count how many boxes are in use and on what. Nothing about your PCs, files or games is sent.

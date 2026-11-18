@@ -47,6 +47,7 @@
   <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
   <symbol id="i-network" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-3h14v3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></symbol>
   <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 2h8l5 5v15H6z"/><path d="M14 2v5h5M9 13h7M9 17h5"/></symbol>
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
   <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
@@ -124,6 +125,10 @@
       <a href="#/network" data-route="network"><svg class="i"><use href="#i-globe"/></svg><span>Uplink</span></a>
       <a href="#/lan" data-route="lan"><svg class="i"><use href="#i-ethernet"/></svg><span>LAN</span></a>
       <a href="#/parties" data-route="parties"><svg class="i"><use href="#i-parties"/></svg><span>Parties</span></a>
+      <a href="#/files" data-route="files"><svg class="i"><use href="#i-folder"/></svg><span>Fileshare</span></a>
+      <a href="#/smb" data-route="smb" class="nav-sub"><svg class="i"><use href="#i-network"/></svg><span>LAN</span></a>
+      <a href="#/ftp" data-route="ftp" class="nav-sub"><svg class="i"><use href="#i-swap"/></svg><span>FTP</span></a>
+      <a href="#/web" data-route="web" class="nav-sub"><svg class="i"><use href="#i-globe"/></svg><span>Web</span></a>
       <a href="#/modem" data-route="modem"><svg class="i"><use href="#i-modem"/></svg><span>Modem</span></a>
       <a href="#/users" data-route="users" class="nav-sub"><svg class="i"><use href="#i-users"/></svg><span>Users</span></a>
       <a href="#/calls" data-route="calls" class="nav-sub"><svg class="i"><use href="#i-calls"/></svg><span>Calls</span></a>
@@ -150,6 +155,9 @@
     <nav class="subnav" id="subnav" aria-label="Modem pages" hidden>
       <a href="#/modem" data-route="modem">Lines</a><a href="#/users" data-route="users">Users</a><a href="#/calls" data-route="calls">Calls</a>
     </nav>
+    <nav class="subnav" id="subnav-files" aria-label="Fileshare pages" hidden>
+      <a href="#/files" data-route="files">Files</a><a href="#/smb" data-route="smb">LAN</a><a href="#/ftp" data-route="ftp">FTP</a><a href="#/web" data-route="web">Web</a>
+    </nav>
     <main id="view" class="view" tabindex="-1"></main>
   </div>
   <nav class="tabbar" id="tabbar" aria-label="Main navigation">
@@ -157,6 +165,7 @@
     <a href="#/network" data-route="network"><svg class="i"><use href="#i-globe"/></svg><span>Uplink</span></a>
     <a href="#/lan" data-route="lan"><svg class="i"><use href="#i-ethernet"/></svg><span>LAN</span></a>
     <a href="#/parties" data-route="parties"><svg class="i"><use href="#i-parties"/></svg><span>Parties</span></a>
+    <a href="#/files" data-route="files"><svg class="i"><use href="#i-folder"/></svg><span>Files</span></a>
     <a href="#/modem" data-route="modem"><svg class="i"><use href="#i-modem"/></svg><span>Modem</span></a>
     <a href="#/settings" data-route="settings"><svg class="i"><use href="#i-settings"/></svg><span>Settings</span></a>
   </nav>

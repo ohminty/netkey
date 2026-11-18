@@ -22,9 +22,12 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
 from urllib.parse import urlsplit
 
+from . import fileshare as fs
 from . import hubclient as hc
 from . import identity as ident
 from . import party as pt
@@ -41,6 +44,11 @@ WATCH_EARLY_S = 30 * 60          # hold the hub's event channel from 30 min befo
 WATCH_LATE_S = 2 * 3600          # ...until 2 h after it (the hub's start window)
 STATUS_FILE = "status.json"
 LEASE_FILE = "leases"
+# Short DHCP leases: PCs renew every 5 minutes. A PC that kept its own box's address into a party then renews
+# with the host, whose dnsmasq refuses an address another PC holds, and the PC asks for a fresh one.
+LEASE_TIME = "10m"
+GARP_AFTER_S = (1, 10, 45, 120)        # gateway announcements after the layout or the party's members change
+SCAN_EVERY_S = 60                      # duplicate-address scan of the retro LAN
 NM_CONF = "/etc/NetworkManager/conf.d/90-netkey-lan.conf"
 RETRO_PORT_FILE = "retro-port.json"     # state dir: MAC of the NIC last used as the retro port (kept off when disabled)
 EXTRA_PORTS_FILE = "extra-ports.json"   # state dir: MACs of extra wired adapters this box switched off
@@ -83,10 +91,18 @@ def addresses(cfg):
     first = hosts[min(99, len(hosts) // 2)]
     return {
         "net": str(net), "prefix": net.prefixlen, "netmask": str(net.netmask), "gateway": str(hosts[0]),
+        "broadcast": str(net.broadcast_address),
         "dhcp_first": str(first), "dhcp_last": str(hosts[-2] if len(hosts) > 4 else hosts[-1]),
         "transit": str(transit), "transit_main": str(list(transit.hosts())[0]),
         "transit_ns": str(list(transit.hosts())[1]),
     }
+
+
+def ip_in(ip, net):
+    try:
+        return ipaddress.IPv4Address(ip) in net
+    except ValueError:
+        return False
 
 
 def read_sys(path, default=None):
@@ -186,6 +202,9 @@ table inet netkey_party {{
     }}
 }}
 """
+    a = addresses(cfg)
+    tcp_share = ", ".join(map(str, fs.TCP_PORTS)) + f", {fs.PASV_PORTS[0]}-{fs.PASV_PORTS[1]}"   # file sharing
+    udp_share = ", ".join(map(str, fs.UDP_PORTS))
     out = f'iifname "{BRIDGE}" oifname "{VETH_NS}" counter accept' if share else \
         f'iifname "{BRIDGE}" oifname "{VETH_NS}" counter drop'
     return f"""table inet netkey_party
@@ -195,9 +214,11 @@ table inet netkey_party {{
         type filter hook input priority filter; policy drop;
         iif "lo" accept
         ct state established,related accept
-        iifname "{BRIDGE}" ip daddr != {{ {addresses(cfg)["gateway"]}, 255.255.255.255 }} counter drop
+        iifname "{BRIDGE}" ip daddr != {{ {a["gateway"]}, {a["broadcast"]}, 255.255.255.255 }} counter drop
         iifname "{BRIDGE}" udp dport {{ 53, 67 }} accept
         iifname "{BRIDGE}" tcp dport 53 accept
+        iifname "{BRIDGE}" tcp dport {{ {tcp_share} }} accept
+        iifname "{BRIDGE}" udp dport {{ {udp_share} }} accept
         iifname "{BRIDGE}" icmp type {{ echo-request, destination-unreachable, time-exceeded }} accept
 {extra}        counter drop
     }}
@@ -221,11 +242,14 @@ table inet netkey_party {{
 def dnsmasq_cmd(cfg, share, run_dir=RUN_DIR):
     a = addresses(cfg)
     cmd = ["dnsmasq", "--keep-in-foreground", "--conf-file=/dev/null", f"--interface={BRIDGE}", "--bind-interfaces",
-           f"--dhcp-range={a['dhcp_first']},{a['dhcp_last']},{a['netmask']},12h", "--dhcp-authoritative",
+           f"--dhcp-range={a['dhcp_first']},{a['dhcp_last']},{a['netmask']},{LEASE_TIME}", "--dhcp-authoritative",
            "--dhcp-broadcast",                 # old DOS/Win9x clients can miss unicast offers before they have an IP
            f"--dhcp-option=option:router,{a['gateway']}", f"--dhcp-option=option:dns-server,{a['gateway']}",
            f"--dhcp-leasefile={os.path.join(run_dir, LEASE_FILE)}", "--pid-file=", "--domain=lan", "--local=/lan/",
            "--expand-hosts", "--no-resolv", "--no-hosts", "--log-facility=-", "--user=nobody", "--group=nogroup"]
+    # the box by name for the file share: http://netkey/, ftp://netkey, \\NETKEY (Win9x also asks DNS)
+    names = sorted({"netkey", fs.netbios_name().lower()})
+    cmd.append(f"--host-record={','.join(names)},{a['gateway']}")
     if share:
         cmd += [f"--server={d}" for d in cfg["lan"]["dns"]]
     return cmd
@@ -277,6 +301,16 @@ class LanDaemon:
         self.adopted_at = []         # recent namespace moves of the retro NIC (rebuild-loop guard)
         self.parked = set()          # retro port kept switched off while the LAN party port is disabled
         self.extra = {}              # name -> MAC: wired adapters beyond the retro port, kept switched off
+        self.share_procs = {}        # file sharing: smbd, nmbd, files (FTP + web) -> Popen
+        self.share_sig = None
+        self.share_fails = {}        # name -> recent exit times (restart back-off)
+        self.share_errors = {}
+        self.share_status = {"active": False, "paused": "The LAN service is starting"}
+        self.ftp_src = None          # (mtime, size) of the GUI's user export the FTP users were made from
+        self.garp_due = []           # monotonic times to announce the gateway (gratuitous ARP)
+        self.last_members = frozenset()
+        self.conflicts = []          # IP addresses two PCs on the retro LAN answer for
+        self.scan_thread, self.scan_next = None, 0.0
         self.rules_sig = None
         self.wg_text = None
         self.wg_addr = None
@@ -393,8 +427,10 @@ class LanDaemon:
         if self.built == (role, share):
             return
         self.run("ip", "-n", ns, "link", "set", "lo", "up")
+        # unprivileged ports: the file servers (user netkey-share) listen on 21 and 80 in here; only NetKey's own
+        # services run in this namespace
         self.nsrun("sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv6.conf.all.disable_ipv6=1",
-                   "net.ipv6.conf.default.disable_ipv6=1")
+                   "net.ipv6.conf.default.disable_ipv6=1", "net.ipv4.ip_unprivileged_port_start=0")
         links = self.ns_links()
         for br in (BRIDGE, PROBE_BRIDGE):
             if br not in links:
@@ -416,6 +452,7 @@ class LanDaemon:
             self.run("ip", "-n", ns, "addr", "replace", f"{a['transit_ns']}/30", "dev", VETH_NS)
             self.run("ip", "-n", ns, "link", "set", VETH_NS, "up")
             self.run("ip", "-n", ns, "addr", "replace", f"{a['gateway']}/{a['prefix']}", "dev", BRIDGE)
+            self.schedule_garp()                 # the gateway may have been another box until now (a party ended)
             if share:
                 self.run("ip", "-n", ns, "route", "replace", "default", "via", a["transit_main"])
             else:
@@ -483,6 +520,16 @@ class LanDaemon:
         if name not in links or "UP" not in links[name].get("flags", []):
             self.run("ip", "-n", self.ns(), "link", "set", name, "up")
         self.nic = name
+
+    def ns_nic_driver(self, name):
+        """The retro NIC's driver (r8152, asix, lan78xx …) while it sits in the namespace (ip netns exec sees its
+        sysfs); asked once per NIC."""
+        cache = self.__dict__.setdefault("_drivers", {})
+        if name not in cache:
+            r = self.nsrun("readlink", "-f", f"/sys/class/net/{name}/device/driver", check=False)
+            path = (r.stdout or "").strip()
+            cache[name] = os.path.basename(path) if r.returncode == 0 and "/drivers/" in path else None
+        return cache[name]
 
     def nic_driver(self, name):
         return os.path.basename(os.path.realpath(os.path.join(self.sys_net, name, "device", "driver")))
@@ -576,6 +623,7 @@ class LanDaemon:
             self.move_nic(BRIDGE)
             self.nic_ok = True
             log.info("lan: %s passed the leak probe; retro LAN connected", self.nic)
+            self.schedule_garp()
             self.remember_retro_port()
         elif now - self.last_probe >= PROBE_EVERY_S:
             self.last_probe = now
@@ -625,6 +673,209 @@ class LanDaemon:
             self.run("nmcli", "general", "reload", "conf", check=False)
 
     # DHCP/DNS
+    # the retro LAN's addresses: who the gateway is, and PCs that share an address
+    def schedule_garp(self):
+        now = time.monotonic()
+        self.garp_due = sorted(set(self.garp_due) | {now + t for t in GARP_AFTER_S})
+
+    def garp_tick(self, role="standalone"):
+        """Tell the PCs where 10.99.0.1 is now (gratuitous ARP). After joining a party they still have their own
+        box's MAC cached for the gateway; after a party ends, the host's. Windows updates its cache from these."""
+        now = time.monotonic()
+        if not self.garp_due or self.garp_due[0] > now or not (self.nic_ok or role == "host"):
+            return
+        self.garp_due = [t for t in self.garp_due if t > now]
+        gw = addresses(self.cfg)["gateway"]
+        for mode in ("-U", "-A"):                # unsolicited request and reply: old stacks heed one or the other
+            self.nsrun("arping", mode, "-c", "1", "-w", "1", "-I", BRIDGE, "-s", gw, gw, check=False)
+
+    def scan_tick(self, role="standalone"):
+        """Every minute, in the background: ask the retro LAN who has each address in use (DHCP leases and the
+        neighbour table). Two different MACs answering for one address is a clash. A host scans even without a
+        working retro port of its own: its party members' PCs are on the same network."""
+        if not (self.nic_ok or role == "host"):
+            return
+        now = time.monotonic()
+        if (self.scan_thread and self.scan_thread.is_alive()) or now < self.scan_next:
+            return
+        self.scan_next = now + SCAN_EVERY_S
+        a = addresses(self.cfg)
+        net = ipaddress.IPv4Network(a["net"])
+        leases = parse_leases(read_sys(os.path.join(self.run_dir, LEASE_FILE), ""))
+        ips = {l["ip"] for l in leases}
+        r = self.nsrun("ip", "-j", "neigh", "show", "dev", BRIDGE, check=False)
+        try:
+            ips |= {n["dst"] for n in json.loads(r.stdout or "[]") if "FAILED" not in n.get("state", [])}
+        except (ValueError, TypeError, KeyError):
+            pass
+        ips = sorted((ip for ip in ips if ip != a["gateway"] and ip_in(ip, net)), key=ipaddress.IPv4Address)[:64]
+        names = {l["mac"].lower(): l["hostname"] for l in leases}
+        self.scan_thread = threading.Thread(target=self.scan, args=(ips, names), daemon=True, name="ip-scan")
+        self.scan_thread.start()
+
+    def scan(self, ips, names):
+        found = []
+        for ip in ips:
+            if self.stopping:
+                return
+            r = self.nsrun("arping", "-c", "2", "-w", "2", "-I", BRIDGE, ip, check=False)
+            macs = sorted({m.lower() for m in re.findall(r"reply from \S+ \[([0-9A-Fa-f:]{17})\]", r.stdout or "")})
+            if len(macs) >= 2:
+                found.append({"ip": ip, "pcs": [{"mac": m, "name": names.get(m, "")} for m in macs]})
+        prev = {c["ip"]: c for c in self.conflicts}
+        for c in found:
+            c["since"] = prev[c["ip"]]["since"] if c["ip"] in prev else time.time()
+            if c["ip"] not in prev:
+                log.warning("lan: two PCs use %s on the retro LAN: %s", c["ip"], ", ".join(
+                    f"{p['name'] or '?'} ({p['mac']})" for p in c["pcs"]))
+        for ip in set(prev) - {c["ip"] for c in found}:
+            log.info("lan: the address clash on %s is gone", ip)
+        self.conflicts = found
+
+    # file sharing (fileshare.py): one folder for the retro LAN over Windows sharing, FTP and the web
+    def share_paused(self, reason):
+        self.stop_fileshare()
+        s = self.cfg["share"]
+        self.share_status = {"active": False, "paused": reason, "name": fs.netbios_name(), "share": fs.SHARE_NAME,
+                             "workgroup": s["workgroup"], "dir": s["dir"],
+                             **{k: {"enabled": bool(s[k]), "running": False, "error": None} for k in ("smb", "ftp", "web")}}
+
+    def stop_fileshare(self):
+        for name, p in list(self.share_procs.items()):
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            log.info("lan: file sharing: %s stopped", name)
+        self.share_procs.clear()
+        self.share_sig = None
+
+    def sync_ftp_users(self):
+        """The modem users (the GUI's export, read by root) hashed for the FTP server, which never sees passwords."""
+        src = os.path.join(self.state_dir, "pap-users.json")
+        try:
+            st = os.stat(src)
+        except OSError:
+            st = None
+        key = (st.st_mtime, st.st_size) if st else None
+        dst = os.path.join(self.run_dir, fs.FTP_USERS_FILE)
+        if key == self.ftp_src and os.path.exists(dst):
+            return
+        old = (read_json(dst, {}) or {}).get("users", {})
+        users = (read_json(src, {}) or {}).get("users", []) if st else []
+        write_json_atomic(dst, {"users": fs.ftp_users(users, old)}, mode=0o640)
+        try:
+            import grp
+            os.chown(dst, 0, grp.getgrnam(fs.SHARE_USER).gr_gid)
+        except (KeyError, PermissionError):
+            pass
+        self.ftp_src = key
+
+    def share_dir_ready(self, path):
+        import grp
+        import pwd
+        pw = pwd.getpwnam(fs.SHARE_USER)
+        if not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+            log.info("lan: file sharing: created %s", path)
+        st = os.stat(path)
+        if (st.st_uid, st.st_gid) != (pw.pw_uid, grp.getgrnam(fs.SHARE_USER).gr_gid) or st.st_mode & 0o7777 != 0o2775:
+            os.chown(path, pw.pw_uid, pw.pw_gid)
+            os.chmod(path, 0o2775)
+
+    def ensure_fileshare(self, role):
+        s, a = self.cfg["share"], addresses(self.cfg)
+        if role == "member":
+            return self.share_paused("This box is in someone else's party, so its PCs are on the host's network. "
+                                     "File sharing is back when the party ends.")
+        want, errors = [], {}
+        try:
+            import pwd
+            pwd.getpwnam(fs.SHARE_USER)
+        except KeyError:
+            return self.share_paused(f"The {fs.SHARE_USER} user is missing: run the NetKey installer again.")
+        if s["smb"]:
+            if shutil.which("smbd") and shutil.which("nmbd"):
+                want += ["smbd", "nmbd"]
+            else:
+                errors["smb"] = "Samba is not installed (sudo apt install samba)"
+        ftp, web = bool(s["ftp"]), bool(s["web"])
+        if ftp:
+            import importlib.util
+            if importlib.util.find_spec("pyftpdlib") is None:
+                errors["ftp"], ftp = "pyftpdlib is not installed (sudo apt install python3-pyftpdlib)", False
+        if ftp or web:
+            want.append("files")
+        conf = fs.smb_conf(self.cfg, self.run_dir, BRIDGE, a["gateway"])
+        sig = (conf, ftp, web, a["gateway"], s["dir"])
+        if sig != self.share_sig:
+            self.stop_fileshare()
+            self.share_sig, self.share_fails, self.share_errors = sig, {}, {}
+            smb_dir = os.path.join(self.run_dir, fs.SMB_DIR)
+            for sub in ("lock", "state", "cache", "private", "pid", "ncalrpc", "nmbd"):
+                os.makedirs(os.path.join(smb_dir, sub), exist_ok=True)
+                os.chmod(os.path.join(smb_dir, sub), 0o755 if sub in ("nmbd", "ncalrpc") else 0o700)   # Samba checks
+            with open(os.path.join(smb_dir, "smb.conf.tmp"), "w") as f:
+                f.write(conf)
+            os.replace(os.path.join(smb_dir, "smb.conf.tmp"), os.path.join(smb_dir, "smb.conf"))
+        for name in [n for n in self.share_procs if n not in want]:
+            p = self.share_procs.pop(name)
+            if p.poll() is None:
+                p.terminate()
+        if want:
+            try:
+                self.share_dir_ready(s["dir"])
+            except OSError as e:
+                return self.share_paused(f"The shared folder {s['dir']} is not usable: {e}")
+        if "files" in want and ftp:
+            self.sync_ftp_users()
+        now = time.monotonic()
+        for name in want:
+            p = self.share_procs.get(name)
+            if p and p.poll() is None:
+                continue
+            if p:
+                self.share_fails.setdefault(name, []).append(now)
+                self.share_errors[name] = f"{name} stopped (exit code {p.returncode}); see journalctl -u netkey-lan"
+                log.warning("lan: file sharing: %s exited with %s", name, p.returncode)
+                self.share_procs.pop(name)
+            recent = self.share_fails[name] = [t for t in self.share_fails.get(name, []) if now - t < 120]
+            if len(recent) >= 3:
+                continue                          # back off: three exits in two minutes
+            self.share_procs[name] = subprocess.Popen(self.share_cmd(name, ftp, web), cwd="/", env=self.share_env())
+            log.info("lan: file sharing: %s started (pid %d)", name, self.share_procs[name].pid)
+        run = {n: bool(self.share_procs.get(n) and self.share_procs[n].poll() is None) for n in ("smbd", "nmbd", "files")}
+
+        def svc(key, running, enabled):
+            err = errors.get(key) or (None if running else next(
+                (self.share_errors[n] for n in (("smbd", "nmbd") if key == "smb" else ("files",))
+                 if n in self.share_errors), None))
+            return {"enabled": enabled, "running": bool(running and enabled), "error": err if enabled else None}
+        self.share_status = {"active": True, "paused": None, "address": a["gateway"], "name": fs.netbios_name(),
+                             "share": fs.SHARE_NAME, "workgroup": s["workgroup"], "dir": s["dir"],
+                             "writable": bool(s["writable"]),
+                             "smb": svc("smb", run["smbd"] and run["nmbd"], bool(s["smb"])),
+                             "ftp": svc("ftp", run["files"] and ftp, bool(s["ftp"])),
+                             "web": svc("web", run["files"] and web, bool(s["web"]))}
+
+    def share_env(self):
+        return {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8",
+                "PYTHONPATH": os.path.dirname(os.path.dirname(os.path.abspath(fs.__file__)))}
+
+    def share_cmd(self, name, ftp, web):
+        ns_exec = ["ip", "netns", "exec", self.ns()]
+        conf = os.path.join(self.run_dir, fs.SMB_DIR, "smb.conf")
+        if name in ("smbd", "nmbd"):
+            return ns_exec + [name, "--foreground", "--no-process-group", "--debug-stdout", f"--configfile={conf}"]
+        s, a = self.cfg["share"], addresses(self.cfg)
+        return ns_exec + ["setpriv", f"--reuid={fs.SHARE_USER}", f"--regid={fs.SHARE_USER}", "--init-groups",
+                          "--no-new-privs", sys.executable, "-m", "netkey.fileshare", "--root", s["dir"],
+                          "--address", a["gateway"], "--name", fs.netbios_name(),
+                          "--users", os.path.join(self.run_dir, fs.FTP_USERS_FILE)] + \
+            (["--ftp"] if ftp else []) + (["--web"] if web else [])
+
     def stop_dnsmasq(self):
         if self.dnsmasq and self.dnsmasq.poll() is None:
             self.dnsmasq.terminate()
@@ -1547,6 +1798,7 @@ class LanDaemon:
 
     def teardown(self, release_nm=False):
         self.stats_since = None
+        self.stop_fileshare()
         self.stop_server()
         self.stop_dnsmasq()
         if self.ns_exists():
@@ -1634,7 +1886,7 @@ class LanDaemon:
             speed = int(r.stdout) if r.stdout.strip().lstrip("-").isdigit() and int(r.stdout) > 0 else None
             nic_info = {"name": self.nic, "mac": (link.get("address") or "").lower(),
                         "carrier": "LOWER_UP" in link.get("flags", []), "speed": speed, "duplex": None,
-                        "quarantined": not self.nic_ok}
+                        "quarantined": not self.nic_ok, "driver": self.ns_nic_driver(self.nic)}
         br = links.get(BRIDGE, {}).get("stats64", {})
         # the retro port's own counters: the bridge device only counts frames addressed to the Pi itself
         io = (links.get(self.nic) or {}).get("stats64", {}) if nic_info else br
@@ -1649,6 +1901,9 @@ class LanDaemon:
             "rx_bytes": io.get("rx", {}).get("bytes", 0), "tx_bytes": io.get("tx", {}).get("bytes", 0),
             "party": {k: v for k, v in party.items() if k != "code"},
             "net": self.uplink.status, "extra_nics": sorted(self.extra),
+            "ip_conflicts": self.conflicts if state == "up" else [],
+            "fileshare": self.share_status if state in ("up", "error") else dict(
+                self.share_status, active=False, paused=detail or "The retro-LAN port is not active"),
             "proto": self.proto_counters() if state == "up" else None, "proto_since": self.stats_since,
             "updated": time.time(), "pid": os.getpid(),
         }
@@ -1727,6 +1982,9 @@ class LanDaemon:
                 self.member_reconcile()
             if member_ids is None or self.party.role != role:
                 return                                         # role changed: rebuild on the next step
+            if frozenset(member_ids) - self.last_members:
+                self.schedule_garp()                           # a member's PCs still know their own box as gateway
+            self.last_members = frozenset(member_ids)
             self.ensure_rules(role, share, member_ids, self.ctrl_ids if role == "host" else None)
             if role != "member":
                 self.ensure_dnsmasq(share)
@@ -1736,6 +1994,17 @@ class LanDaemon:
                 links = self.ns_links()
                 self.nic_tick(links)
                 links = self.ns_links()
+            if not name:
+                self.share_paused("No retro-LAN port: plug in a USB Ethernet adapter")
+            elif self.leak:
+                self.share_paused("The retro-LAN port is quarantined (it is cabled into your home network)")
+            else:
+                self.ensure_fileshare(role)
+            if name and not self.leak and role != "member":
+                self.garp_tick(role)
+                self.scan_tick(role)
+            else:
+                self.conflicts = []
             if self.leak:
                 self.write_status("error", self.leak, share, links)
             else:

@@ -424,6 +424,13 @@ class DemoHub:
         raise PartiesError(404, "not found")
 
 
+def demo_fileshare(cfg):
+    s = cfg["share"]
+    return {"active": True, "paused": None, "address": "10.99.0.1", "name": "NETKEY", "share": "FILES",
+            "workgroup": s["workgroup"], "dir": s["dir"], "writable": s["writable"],
+            **{k: {"enabled": bool(s[k]), "running": bool(s[k]), "error": None} for k in ("smb", "ftp", "web")}}
+
+
 class DemoApp(App):
     demo = True
 
@@ -509,6 +516,7 @@ class DemoApp(App):
                            {"ip": "10.99.0.102", "mac": "00:00:e8:4f:11:02", "hostname": "DOS-486",
                             "expires": t + 21000}],
                 "rx_bytes": 5_400_000 + t % 100000 * 37, "tx_bytes": 1_200_000 + t % 100000 * 9,
+                "fileshare": demo_fileshare(self.cfg()),
                 "updated": now}
 
     def device_present(self, key):
@@ -664,6 +672,14 @@ def setup_demo(base_cfg):
     os.makedirs(run_dir)
     base_cfg = dict(base_cfg)
     base_cfg["lines"] = dict(base_cfg["lines"], max=8)
+    share = os.path.join(root, "share")                 # the shared folder, with a few files to look at
+    os.makedirs(os.path.join(share, "GAMES", "DUKE3D"))
+    os.makedirs(os.path.join(share, "DRIVERS"))
+    for rel, size in (("README.TXT", 1041), ("GAMES/DUKE3D/DUKE3D.ZIP", 6_200_000), ("DRIVERS/NE2000.COM", 3_212),
+                      ("PATCHES.ZIP", 412_000)):
+        with open(os.path.join(share, rel), "wb") as f:
+            f.write(b"x" * size)
+    base_cfg["share"] = dict(base_cfg["share"], dir=share)
     write_json_atomic(os.path.join(state_dir, "lines.json"), {"lines": DEMO_LINES})
     store = Store(state_dir)
     store.reset_admin()

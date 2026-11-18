@@ -9,6 +9,9 @@ PartOf=netkey.target
 Type=simple
 User=netkey
 Group=netkey
+# the shared folder (/srv/netkey) belongs to netkey-share; the GUI uploads into it
+SupplementaryGroups=netkey-share
+ReadWritePaths=-/srv/netkey
 StateDirectory=netkey
 StateDirectoryMode=0750
 ExecStart=/usr/bin/python3 /opt/netkey/modem.py --config /etc/netkey/config.toml --web --run-dir /run/netkey

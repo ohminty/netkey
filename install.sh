@@ -9,7 +9,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 FORCE=0 FORCE_CONFIG=0 RUN_AS_ROOT=0 CHANGED=0 NEW_HOSTNAME="" KEEP_HOSTNAME=0
 DEFAULT_HOSTNAME=netkey
 PKGS=(ppp nftables socat python3 usbutils openssl curl dnsmasq-base busybox iproute2 wireguard-tools iputils-arping iw rfkill
-      avahi-daemon)
+      avahi-daemon samba python3-pyftpdlib)
 
 log() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -96,6 +96,12 @@ fi
 echo "    $PRETTY_NAME, $(uname -m)"
 
 log "Packages"
+# Samba's own services would share on every interface, the home network included: NetKey runs smbd/nmbd itself,
+# inside the retro-LAN namespace only. Masked before the package is installed, so they never start.
+for u in smbd.service nmbd.service samba-ad-dc.service; do
+    systemctl is-active -q "$u" 2>/dev/null && systemctl stop "$u"
+    [[ "$(systemctl is-enabled "$u" 2>/dev/null)" == masked ]] || { systemctl mask -q "$u"; echo "    masked $u"; }
+done
 missing=()
 for p in "${PKGS[@]}"; do dpkg -s "$p" &>/dev/null || missing+=("$p"); done
 if ((${#missing[@]})); then
@@ -170,6 +176,20 @@ if ! id netkey &>/dev/null; then
     echo "    created user netkey"
 fi
 usermod -aG dialout,dip netkey
+if ! id netkey-share &>/dev/null; then       # owns the shared folder; FTP and the web listing run as it
+    useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin netkey-share
+    echo "    created user netkey-share"
+fi
+
+log "Shared folder for the retro LAN (/srv/netkey)"
+if [[ ! -d /srv/netkey ]]; then
+    install -d -m 2775 -o netkey-share -g netkey-share /srv/netkey
+    install -m 0664 -o netkey-share -g netkey-share "$SRC/config/share-readme.txt" /srv/netkey/README.TXT
+    echo "    created /srv/netkey"
+else
+    chown netkey-share:netkey-share /srv/netkey; chmod 2775 /srv/netkey
+    echo "    keeping /srv/netkey"
+fi
 
 log "Files"
 shopt -s nullglob                  # tests/ only ships in developer builds

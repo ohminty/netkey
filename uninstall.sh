@@ -29,8 +29,11 @@ if [[ -f /etc/ppp/pap-secrets ]]; then
     sed -i '/^# BEGIN netkey/,/^# END netkey/d' /etc/ppp/pap-secrets
 fi
 ((PURGE)) && rm -rf /etc/netkey /var/lib/netkey
+systemctl unmask -q smbd.service nmbd.service samba-ad-dc.service 2>/dev/null || true   # masked by install.sh
 systemctl daemon-reload
 udevadm control --reload
 id netkey &>/dev/null && userdel netkey
+((PURGE)) && id netkey-share &>/dev/null && userdel netkey-share
 echo "netkey removed. net.ipv4.ip_forward left at $(sysctl -n net.ipv4.ip_forward) (reboot resets it)."
 ((PURGE)) || echo "Config, TLS certificate and user DB kept in /etc/netkey and /var/lib/netkey (use --purge-config to remove)."
+echo "The shared folder /srv/netkey is kept (your files); remove it yourself if you don't need it."

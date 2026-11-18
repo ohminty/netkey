@@ -11,13 +11,15 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import socket
 import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from . import fileshare as fs
 from . import protostats as ps
 from . import status as st
 from .config import (MODES, SETTINGS, apply_overrides, box_name, check_setting, clean_box_name, client_ip, get_setting,
@@ -57,6 +59,7 @@ def app_version():
     except OSError:
         return "dev"
 SAMPLE_S = 5
+UPLOAD_RESERVE = 200 * 1048576     # uploads leave this much free on the memory card
 UPDATE_CMD = "curl -fsSL https://raw.githubusercontent.com/ohminty/netkey/main/get.sh | sudo bash"
 UPDATE_EVERY_S = 6 * 3600          # the hub is asked about new releases this often (while the GUI is in use)
 UPDATE_RETRY_S = 15 * 60           # after a failed check
@@ -392,6 +395,35 @@ class App:
             threading.Thread(target=self.check_update, daemon=True, name="update-check").start()
         return u
 
+    def system_info(self):
+        """Hardware and OS for the hub's box statistics (sent with the update check): Pi model, OS, architecture,
+        memory and the retro LAN adapter's driver. Nothing that identifies a person or a device."""
+        def first(path):
+            try:
+                with open(path, "rb") as f:
+                    return f.read(200).replace(b"\0", b"").decode(errors="replace").strip()
+            except OSError:
+                return ""
+        osr = {}
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    k, _, v = line.strip().partition("=")
+                    osr[k] = v.strip('"')
+        except OSError:
+            pass
+        mem = 0
+        try:
+            with open("/proc/meminfo") as f:
+                mem = int(f.readline().split()[1]) // 1024
+        except (OSError, ValueError, IndexError):
+            pass
+        lan = self.lan_status() or {}
+        nic = lan.get("nic") or {}
+        return {"model": first("/proc/device-tree/model")[:80], "os": (osr.get("PRETTY_NAME") or "")[:80],
+                "arch": os.uname().machine[:20], "ram": str(mem) if mem else "",
+                "nic": (nic.get("driver") or ("none" if lan.get("state") in ("no_nic", "disabled") else ""))[:24]}
+
     def check_update(self):
         """Ask the hub which release is current (the box's version goes along, for the hub's version count)."""
         from urllib.parse import quote
@@ -401,7 +433,8 @@ class App:
              "latest": prev.get("latest"), "url": prev.get("url"), "notes": prev.get("notes"),
              "published": prev.get("published"), "required": prev.get("required", False)}
         try:
-            d = self.hub_call("GET", f"/v1/release?v={quote(cur)}", timeout=20)
+            info = "".join(f"&{k}={quote(v)}" for k, v in self.system_info().items() if v)
+            d = self.hub_call("GET", f"/v1/release?v={quote(cur)}{info}", timeout=20)
             u.update(latest=d.get("latest"), url=d.get("url"), notes=(d.get("notes") or "")[:2000],
                      published=d.get("published"), required=bool(d.get("required")))
         except PartiesError as e:
@@ -984,6 +1017,8 @@ def make_handler(app, secure):
         def route(self, method):
             url = urlsplit(self.path)
             path = url.path
+            if method == "PUT" and path == "/api/files/upload":
+                return self.upload(parse_qs(url.query))      # streamed: the body is the file
             self.read_body()
             try:
                 if not path.startswith("/api/"):
@@ -1048,6 +1083,8 @@ def make_handler(app, secure):
                 return self.json(200, {"calls": app.calls(limit)})
             if res == "users":
                 return self.api_users(method, arg)
+            if res == "files":
+                return self.api_files(method, arg, query)
             if res == "settings":
                 if method == "GET":
                     return self.json(200, app.settings())
@@ -1186,6 +1223,168 @@ def make_handler(app, secure):
             except KeyError:
                 return self.error(404, "no such user")
             return self.error(405, "method not allowed")
+
+        # ---- the shared folder (fileshare.py serves it to the retro LAN)
+        def share_root(self):
+            root = app.cfg()["share"]["dir"]
+            if not os.path.isdir(root):
+                os.makedirs(root, exist_ok=True)
+                os.chmod(root, 0o2775)
+            return os.path.realpath(root)          # fs.resolve() works with real paths
+
+        def api_files(self, method, arg, query):
+            root = self.share_root()
+            q = lambda k, d="": (query.get(k) or [d])[0]           # noqa: E731
+            try:
+                if method == "GET" and arg is None:
+                    rel = "/".join(fs.rel_parts(q("path")))
+                    du = shutil.disk_usage(root)
+                    return self.json(200, {"path": rel, "entries": fs.listing(root, rel), "free": du.free,
+                                           "total": du.total, "reserve": UPLOAD_RESERVE})
+                if method == "GET" and arg == "download":
+                    return self.download(fs.resolve(root, q("path")))
+                if method == "POST" and arg == "mkdir":
+                    d = self.body()
+                    path = os.path.join(fs.resolve(root, d.get("path")), fs.check_name(d.get("name")))
+                    if os.path.lexists(path):
+                        return self.error(409, "Something with that name is already there.")
+                    os.mkdir(path)
+                    os.chmod(path, 0o2775)
+                    return self.json(200, {"ok": True})
+                if method == "POST" and arg == "rename":
+                    d = self.body()
+                    src = fs.resolve(root, d.get("path"))
+                    if os.path.realpath(src) == os.path.realpath(root):
+                        raise ValueError("the shared folder itself can't be renamed")
+                    dst = os.path.join(os.path.dirname(src), fs.check_name(d.get("to")))
+                    if os.path.lexists(dst) and os.path.normcase(dst) != os.path.normcase(src):
+                        return self.error(409, "Something with that name is already there.")
+                    os.rename(src, dst)
+                    return self.json(200, {"ok": True})
+                if method == "POST" and arg == "move":
+                    d = self.body()
+                    to = fs.resolve(root, d.get("to"))
+                    if not os.path.isdir(to):
+                        raise ValueError("move to a folder")
+                    moved = 0
+                    for rel in d.get("paths") or []:
+                        src = fs.resolve(root, rel)
+                        dst = os.path.join(to, os.path.basename(src))
+                        if os.path.realpath(src) == os.path.realpath(root) or \
+                                (os.path.realpath(to) + os.sep).startswith(os.path.realpath(src) + os.sep):
+                            raise ValueError("a folder can't be moved into itself")
+                        if os.path.lexists(dst):
+                            return self.error(409, f"{os.path.basename(src)} is already in that folder.")
+                        os.rename(src, dst)
+                        moved += 1
+                    return self.json(200, {"ok": True, "moved": moved})
+                if method == "POST" and arg == "delete":
+                    n = 0
+                    for rel in self.body().get("paths") or []:
+                        path = fs.resolve(root, rel)
+                        if os.path.realpath(path) == os.path.realpath(root):
+                            raise ValueError("the shared folder itself can't be deleted")
+                        if os.path.isdir(path) and not os.path.islink(path):
+                            shutil.rmtree(path)
+                        else:
+                            os.unlink(path)
+                        n += 1
+                    log.info("web: deleted %d item(s) from the shared folder", n)
+                    return self.json(200, {"ok": True, "deleted": n})
+            except FileNotFoundError:
+                return self.error(404, "That file or folder is gone (someone may have moved it from a PC).")
+            except NotADirectoryError:
+                return self.error(400, "That is not a folder.")
+            except PermissionError:
+                return self.error(403, "The box may not change that file (check the folder's permissions).")
+            return self.error(404, "not found")
+
+        def download(self, path):
+            if not os.path.isfile(path):
+                return self.error(400, "only files can be downloaded")
+            name = os.path.basename(path)
+            with open(path, "rb") as f:
+                size = os.fstat(f.fileno()).st_size
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                if self.command != "HEAD":
+                    shutil.copyfileobj(f, self.wfile, 256 * 1024)
+
+        def upload(self, query):
+            """PUT /api/files/upload?path=DIR&name=NAME[&overwrite=1]: the body is the file, streamed to disk.
+            NAME may hold subfolders (a dropped folder), created as needed."""
+            self.raw_body = b""
+            try:
+                n = int(self.headers.get("Content-Length") or -1)
+            except ValueError:
+                n = -1
+            def refuse(code, msg):                                # noqa: E306
+                self.close_connection = True                     # the body is not read: drop the connection
+                return self.error(code, msg)
+            if self.headers.get("X-Requested-With") != "netkey":
+                return refuse(403, "missing X-Requested-With header")
+            if not app.valid(self.token()):
+                return refuse(401, "login required")
+            if app.must_change_password():
+                return refuse(403, "Set a new admin password first.")
+            if n < 0:
+                return refuse(411, "Content-Length is required")
+            q = lambda k, d="": (query.get(k) or [d])[0]           # noqa: E731
+            tmp = None
+            try:
+                root = self.share_root()
+                parts = fs.rel_parts(q("name"))
+                if not parts:
+                    raise ValueError("name is missing")
+                du = shutil.disk_usage(root)
+                if n > du.free - UPLOAD_RESERVE:
+                    return refuse(507, f"Not enough space on the memory card: {du.free // 1048576} MB free.")
+                folder = fs.resolve(root, q("path"))
+                for p in parts[:-1]:
+                    folder = os.path.join(folder, p)
+                    if not os.path.isdir(folder):
+                        os.mkdir(folder)
+                        os.chmod(folder, 0o2775)
+                fs.resolve(root, os.path.relpath(folder, root))     # still inside (a symlinked folder is refused)
+                dst = os.path.join(folder, parts[-1])
+                if os.path.isdir(dst) or (os.path.lexists(dst) and q("overwrite") != "1"):
+                    return refuse(409, f"{parts[-1]} is already there.")
+                tmp = os.path.join(folder, f".upload-{secrets.token_hex(6)}")
+                left = n
+                with open(tmp, "wb") as f:
+                    while left:
+                        chunk = self.rfile.read(min(left, 256 * 1024))
+                        if not chunk:
+                            raise ConnectionResetError("upload broke off")
+                        f.write(chunk)
+                        left -= len(chunk)
+                os.chmod(tmp, 0o664)
+                os.replace(tmp, dst)
+                tmp = None
+                log.info("web: uploaded %s (%d bytes) to the shared folder", "/".join(parts), n)
+                return self.json(200, {"ok": True, "name": parts[-1], "size": n})
+            except ValueError as e:
+                return refuse(400, str(e))
+            except FileNotFoundError:
+                return refuse(404, "That folder is gone.")
+            except PermissionError:
+                return refuse(403, "The box may not write there (check the folder's permissions).")
+            except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError):
+                self.close_connection = True
+                log.info("web: an upload to the shared folder broke off")
+            except OSError as e:
+                return refuse(500, f"Could not save the file: {e.strerror or e}")
+            finally:
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
         def static(self, path):
             name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")

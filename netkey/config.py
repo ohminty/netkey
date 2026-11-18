@@ -72,6 +72,15 @@ DEFAULTS = {
         "hub_fingerprint": "cc4045ee943d7ccb21cb6bb2601c5a3251096477bc427d482138445ad65d194f",
         "hub_relay": "",                 # pin parties this box hosts to one relay, e.g. "us-nyc" (tests; "" = nearest)
     },
+    "share": {
+        # file sharing to the retro LAN (never the home network): one folder, three ways in
+        "dir": "/srv/netkey",
+        "smb": True,               # Windows file sharing (Network Neighborhood), guest access, SMB1 for Win 3.11-XP
+        "ftp": True,               # FTP; logins are the modem users
+        "web": True,               # plain HTTP directory listing for old browsers (read only)
+        "workgroup": "WORKGROUP",
+        "writable": True,          # PCs may add, change and delete files over the Windows share
+    },
     "network": {
         "uplink": "ethernet",      # ethernet: built-in port is the uplink | wifi: Wi-Fi is, the built-in port decides
         "hotspot": True,           # rescue Wi-Fi hotspot when the box has had no uplink for a while
@@ -99,6 +108,7 @@ CHOICES = {
     ("network", "uplink"): {"ethernet", "wifi"},
 }
 MODES = ("virtual", "physical")
+WORKGROUP_RE = re.compile(r"^[A-Za-z0-9_-]{1,15}$")
 BAUD_CHOICES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200]
 
 # Settings the web GUI may change. They are stored in the state DB and override config.toml.
@@ -148,6 +158,14 @@ SETTINGS = [
      None, {}),
     ("lan.party_auto_approve", "bool", "Approve join requests automatically",
      "When hosting a LAN party, every box with the invite code joins without asking.", None, {}),
+    ("share.smb", "bool", "Windows file sharing",
+     "The shared folder shows up in Network Neighborhood on the retro LAN (no password).", None, {}),
+    ("share.ftp", "bool", "FTP server", "Log in with a modem user's name and password.", None, {}),
+    ("share.web", "bool", "Web server", "A plain page old browsers can download the files from.", None, {}),
+    ("share.workgroup", "string", "Workgroup",
+     "The Windows workgroup the box appears in. Up to 15 letters, digits, - and _.", None, {"maxlength": 15}),
+    ("share.writable", "bool", "PCs can change files",
+     "Retro PCs may add, change and delete files over Windows file sharing. Off: they can only read.", None, {}),
     ("network.uplink", "choice", "Uplink",
      "Ethernet: the built-in port connects the box to your network. Wi-Fi: Wi-Fi does, and the built-in port "
      "becomes the retro-LAN port when cabled to retro PCs (or a management port when cabled into your network).",
@@ -300,6 +318,10 @@ def check_setting(key, value):
         return value
     if not value or len(value) > 120 or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ValueError(f"{label}: must be 1-120 printable characters")
+    if key == "share.workgroup":
+        if not WORKGROUP_RE.match(value):
+            raise ValueError(f"{label}: up to 15 letters, digits, - and _")
+        return value.upper()
     if key == "physical.init_string" and not value.upper().startswith("AT"):
         raise ValueError(f"{label}: must start with AT")
     return value
