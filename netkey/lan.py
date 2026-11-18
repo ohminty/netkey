@@ -799,6 +799,8 @@ class LanDaemon:
         if s["smb"]:
             if shutil.which("smbd") and shutil.which("nmbd"):
                 want += ["smbd", "nmbd"]
+                if os.path.exists(os.path.join(fs.SAMBA_LIBEXEC, "samba-dcerpcd")):
+                    want.append("dcerpcd")
             else:
                 errors["smb"] = "Samba is not installed (sudo apt install samba)"
         ftp, web = bool(s["ftp"]), bool(s["web"])
@@ -816,7 +818,9 @@ class LanDaemon:
             smb_dir = os.path.join(self.run_dir, fs.SMB_DIR)
             for sub in ("lock", "state", "cache", "private", "pid", "ncalrpc", "nmbd"):
                 os.makedirs(os.path.join(smb_dir, sub), exist_ok=True)
-                os.chmod(os.path.join(smb_dir, sub), 0o755 if sub in ("nmbd", "ncalrpc") else 0o700)   # Samba checks
+                # nmbd and ncalrpc: Samba insists on 0755. cache: browse.dat, which smbd reads as the guest user
+                # when a PC asks for the computer list (Network Neighborhood); 0700 gave every PC an empty list
+                os.chmod(os.path.join(smb_dir, sub), 0o755 if sub in ("nmbd", "ncalrpc", "cache") else 0o700)
             with open(os.path.join(smb_dir, "smb.conf.tmp"), "w") as f:
                 f.write(conf)
             os.replace(os.path.join(smb_dir, "smb.conf.tmp"), os.path.join(smb_dir, "smb.conf"))
@@ -850,7 +854,7 @@ class LanDaemon:
 
         def svc(key, running, enabled):
             err = errors.get(key) or (None if running else next(
-                (self.share_errors[n] for n in (("smbd", "nmbd") if key == "smb" else ("files",))
+                (self.share_errors[n] for n in (("smbd", "nmbd", "dcerpcd") if key == "smb" else ("files",))
                  if n in self.share_errors), None))
             return {"enabled": enabled, "running": bool(running and enabled), "error": err if enabled else None}
         self.share_status = {"active": True, "paused": None, "address": a["gateway"], "name": fs.netbios_name(),
@@ -869,6 +873,10 @@ class LanDaemon:
         conf = os.path.join(self.run_dir, fs.SMB_DIR, "smb.conf")
         if name in ("smbd", "nmbd"):
             return ns_exec + [name, "--foreground", "--no-process-group", "--debug-stdout", f"--configfile={conf}"]
+        if name == "dcerpcd":
+            return ns_exec + [os.path.join(fs.SAMBA_LIBEXEC, "samba-dcerpcd"), "--foreground", "--no-process-group",
+                              "--debug-stdout", f"--configfile={conf}"] + \
+                [os.path.join(fs.SAMBA_LIBEXEC, r) for r in fs.RPCDS if os.path.exists(os.path.join(fs.SAMBA_LIBEXEC, r))]
         s, a = self.cfg["share"], addresses(self.cfg)
         return ns_exec + ["setpriv", f"--reuid={fs.SHARE_USER}", f"--regid={fs.SHARE_USER}", "--init-groups",
                           "--no-new-privs", sys.executable, "-m", "netkey.fileshare", "--root", s["dir"],

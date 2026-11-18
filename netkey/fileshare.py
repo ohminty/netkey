@@ -36,6 +36,11 @@ FTP_USERS_FILE = "ftp-users.json"        # run dir: modem users with hashed pass
 FTP_HASH_ITERATIONS = 20000
 PASV_PORTS = (40000, 40049)
 SMB_DIR = "samba"                        # run dir: Samba's config, locks and state
+SAMBA_LIBEXEC = "/usr/libexec/samba"
+# Samba's RPC services (share lists for XP and smbclient, name lookups). Samba normally starts them on demand,
+# eight helper programs at once; a Pi 1 needs longer than smbd waits, so nothing ever answers. NetKey runs
+# samba-dcerpcd itself, all the time, with only these.
+RPCDS = ("rpcd_classic", "rpcd_epmapper", "rpcd_lsad", "rpcd_winreg")   # classic needs winreg
 TCP_PORTS = (21, 80, 139, 445)
 UDP_PORTS = (137, 138)
 BAD_CHARS = set('/\\:*?"<>|')            # also not allowed by Windows; Samba would mangle them
@@ -137,6 +142,7 @@ def smb_conf(cfg, run_dir, iface, gateway):
     # the box is the browse master of the retro LAN: it lists the PCs in Network Neighborhood
     local master = yes
     preferred master = yes
+    domain master = yes
     os level = 65
     wins support = yes
     dns proxy = no
@@ -154,6 +160,7 @@ def smb_conf(cfg, run_dir, iface, gateway):
     pid directory = {d}/pid
     ncalrpc dir = {d}/ncalrpc
     nmbd:socket dir = {d}/nmbd
+    rpc start on demand helpers = no
     passdb backend = tdbsam:{d}/private/passdb.tdb
     log level = 1
 
