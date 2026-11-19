@@ -510,9 +510,11 @@ const LAN_STATES = {
   error: { label: "Error", cls: "red" },
   stopped: { label: "Service not running", cls: "gray" },
 };
+// PCs on the retro LAN: DHCP leases plus PCs with a fixed address the box hears (netkey-lan's scan)
+const lanPcCount = (lan) => (lan ? (lan.leases || []).length + (lan.static_pcs || []).length : 0);
 const lanPill = (lan) => {
   const s = LAN_STATES[lan.state] || { label: humanize(lan.state || "unknown"), cls: "gray" };
-  const glow = lan.state === "up" && (lan.leases || []).length ? " pill-glow" : "";
+  const glow = lan.state === "up" && lanPcCount(lan) ? " pill-glow" : "";
   return html`<span class="pill pill-${raw(s.cls + glow)}">${s.label}</span>`;
 };
 const MODE_NAME = { virtual: "Virtual", physical: "Physical" };
@@ -565,7 +567,7 @@ function renderChrome() {
     ${demo ? html`<span class="chip chip-demo" title="Simulated lines and calls (--demo)">${icon("activity", "i-sm")}<span class="lbl">Demo data</span></span>` : ""}
     ${sum ? html`<span class="chip" title="${sum.connected} connected, ${sum.busy} busy"><span class="dot ${sum.connected ? "dot-live" : ""}"></span><b class="tnum">${sum.connected}</b><span class="lbl">online</span></span>` : ""}`);
   if (st) {
-    const lanPcs = st.lan && st.lan.state === "up" ? (st.lan.leases || []).length : 0;
+    const lanPcs = st.lan && st.lan.state === "up" ? lanPcCount(st.lan) : 0;
     $$("#nav a[data-route=dashboard], #nav a[data-route=modem], #nav a[data-route=lan]").forEach((a) => {
       let c = a.querySelector(".count");
       const n = a.dataset.route === "modem" ? sum.connected : a.dataset.route === "lan" ? lanPcs : 0;
@@ -578,10 +580,20 @@ function renderChrome() {
   }
   const banners = [];
   if (S.updated) banners.push(html`<div class="banner" role="status">${icon("reset")}<span><b>NetKey was updated on this box.</b> <span class="muted">Reload the page to use the new version.</span></span><button type="button" class="btn btn-sm btn-primary" data-action="reload-page">Reload</button></div>`);
-  const up = st && st.update;
-  if (up && up.available && currentName === "dashboard" && (up.required || updateDismissed() !== up.latest)) {   // the Dashboard only
+  const up = st && st.update, uj = st && st.update_job;
+  const updating = uj && (UPDATE_RUNNING.includes(uj.state) || (uj.state === "done" && up && uj.target === up.latest));
+  if (up && up.available && !updating && currentName === "dashboard" && (up.required || updateDismissed() !== up.latest)) {   // the Dashboard only
     banners.push(html`<div class="banner ${up.required ? "banner-warn" : ""}" role="status" data-key="upd-${up.latest}">${icon(up.required ? "alert" : "download")}<span><b>${up.required ? `Update required: NetKey ${up.latest}` : `NetKey ${up.latest} is available.`}</b> <span class="muted">${up.required ? `The cloud hub needs a newer version than ${up.current} for parties.` : `This box runs ${up.current}. Nothing updates by itself.`}</span></span>
-      <button type="button" class="btn btn-sm btn-primary" data-action="update-howto">How to update</button>${up.required ? "" : html`<button type="button" class="btn btn-sm btn-ghost" data-action="update-later">Later</button>`}</div>`);
+      <button type="button" class="btn btn-sm btn-primary" data-action="update-now">Update now</button><button type="button" class="btn btn-sm btn-ghost" data-action="update-howto">Manually</button>${up.required ? "" : html`<button type="button" class="btn btn-sm btn-ghost" data-action="update-later">Later</button>`}</div>`);
+  }
+  const job = st && st.update_job;
+  if (job && UPDATE_RUNNING.includes(job.state)) {
+    banners.push(html`<div class="banner" role="status" data-key="upd-run">${spinner()}<span><b>Updating to NetKey ${job.target || ""}…</b> <span class="muted">${job.message || ""}</span></span><button type="button" class="btn btn-sm" data-action="update-progress">Show progress</button></div>`);
+  } else if (job && ["done", "failed", "rolled_back"].includes(job.state) && job.updated && nowS() - job.updated < 6 * 3600
+             && currentName === "dashboard" && updateSeen() !== String(job.updated)) {
+    const ok = job.state === "done";
+    banners.push(html`<div class="banner ${ok ? "" : "banner-warn"}" role="status" data-key="upd-end">${icon(ok ? "check" : "alert")}<span><b>${ok ? `Updated to NetKey ${job.target}.` : job.state === "rolled_back" ? `The update to ${job.target} failed; ${job.from} was put back.` : `The update to ${job.target} failed.`}</b> <span class="muted">${ok ? "" : job.message || ""}</span></span>
+      <button type="button" class="btn btn-sm btn-ghost" data-action="update-progress">Details</button><button type="button" class="btn btn-sm btn-ghost" data-action="update-seen" data-t="${job.updated}">Dismiss</button></div>`);
   }
   if (!S.online) banners.push(html`<div class="banner banner-warn" role="status">${spinner()}<span><b>Connection lost.</b> <span class="muted">Retrying… the values below may be stale.</span></span></div>`);
   if (st && st.admin && st.admin.default_credentials) banners.push(html`<div class="banner banner-warn" role="alert">${icon("lock")}<span><b>Default login in use.</b> <span class="muted">Anyone on your network can sign in with admin / admin.</span> <a href="#/settings">Change it in Settings</a></span></div>`);
@@ -624,7 +636,7 @@ function kpis(st, pub) {
   const up = lan && lan.state === "up";
   const p = up ? partyState() : null, role = p && p.role;
   const pct = (a, b) => (b ? Math.min(100, Math.round((a / b) * 100)) : 0);
-  const pcs = lan ? (lan.leases || []).length : 0;
+  const pcs = lanPcCount(lan);
   const lanText = !lan ? "Not available on this box" : lan.state === "no_nic" ? "No USB Ethernet adapter" : lan.state === "disabled" ? "The LAN port is off"
     : lan.state === "stopped" ? "LAN service not running" : lan.state === "error" ? lan.detail || "The LAN port has a problem" : "";
   // 1 · LAN party
@@ -1179,7 +1191,7 @@ const Lan = {
   },
   hero(lan) {
     const nic = lan.nic;
-    const n = (lan.leases || []).length;
+    const n = lanPcCount(lan);
     const p = partyState() || {};
     const pcs = n ? `${n} PC${n === 1 ? "" : "s"} connected` : "waiting for PCs";
     const sub = lan.state === "up" && p.role === "host" ? `Hosting a LAN party · ${pcs} · DHCP for every party box`
@@ -1250,19 +1262,26 @@ const Lan = {
     </section>`;
   },
   leases(lan, p) {
-    const list = [...(lan.leases || [])].sort((a, b) => ipNum(a.ip) - ipNum(b.ip));
+    const fixed = (lan.static_pcs || []).map((x) => ({ ip: x.ip, mac: x.mac, hostname: x.name || "", fixed: true, in_range: x.in_range, seen: x.seen }));
+    const list = [...(lan.leases || []), ...fixed].sort((a, b) => ipNum(a.ip) - ipNum(b.ip));
     const member = p && p.role === "member";
     const fromHost = `Your retro PCs get their addresses from the party host (${partyName(p || {})}).`;
-    const sub = member ? "Addresses from the party host" : list.length ? `${list.length} DHCP lease${list.length === 1 ? "" : "s"}${p && p.role === "host" ? " · all party boxes" : ""}` : "DHCP leases";
+    const nLease = (lan.leases || []).length;
+    const sub = member ? "Addresses from the party host" : list.length ? `${nLease} DHCP lease${nLease === 1 ? "" : "s"}${fixed.length ? ` · ${fixed.length} fixed address${fixed.length === 1 ? "" : "es"}` : ""}${p && p.role === "host" ? " · all party boxes" : ""}` : "DHCP leases";
+    const inRange = fixed.filter((x) => x.in_range);
+    const range = lan.dhcp_range && lan.dhcp_range.length === 2 ? lan.dhcp_range : null;
+    const gw = lan.gateway || "10.99.0.1", free = gw.replace(/\.\d+$/, "");
     return html`<section class="card" aria-labelledby="h-pcs" data-key="pcs-${member ? "member" : "dhcp"}">
       <div class="card-head"><h3 id="h-pcs">Connected PCs</h3><span class="sub">${sub}</span></div>
       ${list.length ? html`<div class="table-wrap"><table class="table lan-table">
-          <thead><tr><th>PC</th><th>IP address</th><th>MAC address</th><th>Lease expires</th></tr></thead>
+          <thead><tr><th>PC</th><th>IP address</th><th>MAC address</th><th>Address</th></tr></thead>
           <tbody>${list.map((l) => html`<tr data-key="pc-${l.mac}">
             <td><div class="cell-user"><span class="pc-ic">${icon("pc")}</span>${l.hostname ? html`<b class="mono">${l.hostname}</b>` : html`<span class="faint">unknown</span>`}</div></td>
             <td class="mono nowrap">${l.ip}</td>
             <td class="mono nowrap muted">${l.mac}</td>
-            <td class="nowrap">${l.expires ? relTime(l.expires) : html`<span class="faint">never</span>`}</td></tr>`)}</tbody></table></div>
+            <td class="nowrap">${l.fixed ? html`<span class="pill ${l.in_range ? "pill-amber" : "pill-gray"} no-dot" title="Set on the PC itself; it never asked this box for an address">Fixed address</span>${l.in_range ? html` <span class="warn">${icon("alert", "i-sm")}</span>` : ""}`
+              : l.expires ? html`<span class="faint">DHCP · renews</span> ${relTime(l.expires)}` : html`<span class="faint">DHCP · no expiry</span>`}</td></tr>`)}</tbody></table></div>
+          ${inRange.length && range ? html`<p class="card-note warn-note">${icon("alert", "i-sm")}<span>${inRange.map((x) => x.ip).join(", ")} ${inRange.length === 1 ? "is a fixed address" : "are fixed addresses"} inside the range the box hands out (${range[0]} to ${range[1]}). The box won't give ${inRange.length === 1 ? "it" : "them"} to another PC while ${inRange.length === 1 ? "that PC is" : "those PCs are"} on, but they can clash after a PC was switched off. Use ${free}.2 to ${free}.${Math.max(2, Number(range[0].split(".")[3]) - 1)} for fixed addresses, or set the PC to obtain an address automatically.</span></p>` : ""}
           ${member ? html`<p class="card-note">${icon("info", "i-sm")}${fromHost}</p>` : ""}`
         : member ? emptyState("network", "Addresses come from the host", fromHost)
         : emptyState("pc", "No PCs yet", "Set the PC's network to obtain an IP address automatically (DHCP).")}
@@ -3339,6 +3358,70 @@ const showVal = (s, v) => (s.type === "bool" ? (v ? "on" : "off") : s.type === "
 
 // update notice: the box asks the cloud hub a few times a day which release is current (see the Settings card)
 const UPDATE_KEY = "netkey-update-later";
+const UPDATE_RUNNING = ["queued", "checking", "downloading", "installing", "verifying", "rolling_back"];
+function updateSeen() { try { return localStorage.getItem("netkey-update-seen") || ""; } catch { return ""; } }
+const UPDATE_STEPS = [["checking", "Checking"], ["downloading", "Downloading"], ["installing", "Installing"], ["verifying", "Checking it runs"], ["done", "Done"]];
+// click-to-update: the admin password again, then the root updater does the work and this dialog follows it
+function updateNowDialog(u) {
+  const st = S.status || {}, p = partyState() || {};
+  const busy = p.role && p.role !== "standalone" ? "This box is in a LAN party: it leaves the party while services restart."
+    : st.summary && st.summary.busy ? "A modem line is in a call: the call drops." : "";
+  openModal({
+    title: `Update to NetKey ${u.latest}`, iconName: "download", wide: true,
+    body: html`<p>The box downloads NetKey ${u.latest} and installs it over ${u.current}. <b>Settings, users, files and history are kept.</b> Its services restart, so this takes a few minutes (longer on a Pi 1) and you'll be asked to sign in again afterwards.</p>
+      <p class="faint" style="font-size:12.5px">If the new version doesn't start properly, the box puts ${u.current} back by itself.</p>
+      ${busy ? html`<label class="check-row"><input type="checkbox" name="force"><span><b>Update anyway.</b> ${busy}</span></label>` : ""}
+      <label class="field"><span class="field-label">Admin password</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>
+      ${u.notes ? html`<h4 class="upd-h">What's new in ${u.latest}</h4><pre class="upd-notes">${u.notes}</pre>` : ""}`,
+    foot: html`<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn btn-primary">Update now</button>`,
+    initialFocus: 'input[name="password"]',
+    onSubmit: async (form) => {
+      if (busy && !form.force.checked) { toast(busy.split(":")[0], { type: "err", detail: "Tick “Update anyway”, or update after the party or call." }); return false; }
+      await api("/api/update/install", { method: "POST", body: { version: u.latest, password: form.password.value, force: !!(form.force && form.force.checked) } });
+      setTimeout(() => updateProgressDialog(), 50);
+    },
+  });
+}
+function updateProgressDialog() {
+  let timer = 0, lost = 0, done = false;
+  const m = openModal({
+    title: "Updating NetKey", iconName: "download", wide: true,
+    body: html`<div class="upd-prog" aria-live="polite"><p class="muted">Starting…</p></div>`,
+    foot: html`<span class="spacer"></span><button type="button" class="btn" data-close>Close</button>`,
+    onClose: () => clearTimeout(timer),
+  });
+  const box = m.el.querySelector(".upd-prog");
+  const show = (job, extra = "") => {
+    const order = UPDATE_STEPS.map((x) => x[0]), at = job.state === "rolling_back" || job.state === "rolled_back" ? order.indexOf("verifying") : order.indexOf(job.state);
+    const steps = UPDATE_STEPS.map(([k, label], i) => html`<li class="${i < at || job.state === "done" ? "is-done" : i === at ? "is-now" : ""}">${i < at || job.state === "done" ? icon("check", "i-sm") : i === at && !["failed", "rolled_back"].includes(job.state) ? spinner() : html`<span class="dot"></span>`}${label}</li>`);
+    const end = job.state === "done" ? html`<div class="banner" role="status">${icon("check")}<span><b>Updated to NetKey ${job.target}.</b> Reload to use the new version.</span><button type="button" class="btn btn-sm btn-primary" data-action="reload-page">Reload</button></div>`
+      : job.state === "rolled_back" ? html`<div class="banner banner-warn" role="alert">${icon("alert")}<span><b>The update failed; NetKey ${job.from} was put back.</b> ${job.message || ""}</span></div>`
+      : job.state === "failed" ? html`<div class="banner banner-err" role="alert">${icon("alert")}<span><b>Not updated.</b> ${job.message || ""}</span></div>` : "";
+    box.innerHTML = String(html`<ol class="upd-steps">${steps}</ol>${end}${extra}
+      ${job.message && !end ? html`<p class="muted">${job.message}</p>` : ""}
+      ${(job.log || []).length ? html`<details ${["failed", "rolled_back"].includes(job.state) ? raw("open") : ""}><summary>Details</summary><pre class="upd-notes upd-log">${(job.log || []).join("\n")}</pre></details>` : ""}`);
+  };
+  let last = { state: "queued" };
+  const poll = async () => {
+    try {
+      const r = await fetch("/api/update/progress", { credentials: "same-origin", cache: "no-store" });
+      if (r.status === 401) {          // the web service restarted: sessions are gone
+        show(last, String(html`<div class="banner" role="status">${icon("lock")}<span><b>The box restarted its services and signed you out.</b> Sign in again: the Dashboard shows how the update ended.</span><button type="button" class="btn btn-sm btn-primary" data-action="reload-page">Sign in</button></div>`));
+        return;
+      }
+      const d = await r.json();
+      last = d.job; lost = 0;
+      show(d.job);
+      done = ["done", "failed", "rolled_back"].includes(d.job.state);
+      if (done) { refreshStatus(); return; }
+    } catch {
+      lost++;
+      show(last, String(html`<p class="muted">${spinner()} The box is restarting its services; reconnecting…</p>`));
+    }
+    timer = setTimeout(poll, lost ? 4000 : 2000);
+  };
+  poll();
+}
 function updateDismissed() { try { return localStorage.getItem(UPDATE_KEY) || ""; } catch { return ""; } }
 function updateDialog(u) {
   openModal({
@@ -3367,7 +3450,9 @@ function softwareCard(u, busy) {
       : u && !u.latest ? html`<p class="card-note">${icon("info", "i-sm")}The cloud hub hasn't found a NetKey release on GitHub yet.</p>` : ""}
     <div class="card-pad row wrap" style="gap:8px;padding-top:4px">
       <button type="button" class="btn ${busy ? "is-busy" : ""}" data-action="update-check" ${busy ? raw("disabled") : ""}>${icon("reset")}Check now</button>
-      <button type="button" class="btn ${u && u.available ? "btn-primary" : ""}" data-action="update-howto">${u && u.available ? `How to update to ${u.latest}` : "How to update"}</button>
+      ${u && u.available ? html`<button type="button" class="btn btn-primary" data-action="update-now">${icon("download")}Update to ${u.latest}</button>` : ""}
+      <button type="button" class="btn ${u && u.available ? "btn-ghost" : ""}" data-action="update-howto">${u && u.available ? "Update manually" : "How to update"}</button>
+      <button type="button" class="btn btn-ghost" data-action="update-history">Update history</button>
     </div>
   </section>`;
 }
@@ -4241,6 +4326,28 @@ const ACTIONS = {
   "update-howto"() {
     const u = (S.status && S.status.update) || {};
     updateDialog({ command: u.command || "curl -fsSL https://raw.githubusercontent.com/ohminty/netkey/main/get.sh | sudo bash", ...u });
+  },
+  "update-now"() {
+    const u = (S.status && S.status.update) || {};
+    const job = S.status && S.status.update_job;
+    if (job && UPDATE_RUNNING.includes(job.state)) return updateProgressDialog();
+    if (!u.available) return toast("No update is available", { detail: "Check for updates on the Settings page." });
+    updateNowDialog(u);
+  },
+  "update-progress"() { updateProgressDialog(); },
+  "update-seen"(el) { try { localStorage.setItem("netkey-update-seen", el.dataset.t); } catch { /* shows again */ } renderChrome(); },
+  async "update-history"() {
+    let d;
+    try { d = await api("/api/update/progress"); } catch (e) { return toastErr(e, "Could not load the update history"); }
+    const res = { updated: "pill-green", "rolled back": "pill-amber", failed: "pill-red", "not started": "pill-gray" };
+    openModal({
+      title: "Update history", iconName: "download", wide: true,
+      body: d.history.length ? html`<div class="table-wrap"><table class="table"><thead><tr><th>When</th><th>Update</th><th>Result</th><th>By</th></tr></thead><tbody>${d.history.map((h) => html`<tr>
+          <td class="nowrap">${h.finished ? relTime(h.finished) : "—"}</td><td class="mono nowrap">${h.from || "?"} → ${h.to || "?"}</td>
+          <td><span class="pill ${res[h.result] || "pill-gray"} no-dot">${h.result}</span>${h.message && h.result !== "updated" ? html`<span class="sub" style="white-space:normal">${h.message}</span>` : ""}</td><td>${h.by || ""}</td></tr>`)}</tbody></table></div>`
+        : html`<p class="muted">No updates from the web page yet.</p>`,
+      foot: html`<span class="spacer"></span><button type="button" class="btn btn-primary" data-close>Done</button>`,
+    });
   },
   "update-later"() {
     const u = S.status && S.status.update;

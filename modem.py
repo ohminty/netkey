@@ -124,6 +124,8 @@ def main():
                         "approve NAME|all | reject NAME | kick NAME|ID | regenerate | endpoint HOST | leave | close")
     p.add_argument("--wifi", nargs="+", metavar="CMD",
                    help="network uplink: status | scan | connect SSID [PASSWORD] [country=NO] | forget")
+    p.add_argument("--update", action="store_true",
+                   help="(root, netkey-update.service) install the release an admin asked for in the GUI")
     p.add_argument("--sync-pap-secrets", action="store_true",
                    help="(root) rewrite the netkey block of /etc/ppp/pap-secrets from the GUI user list")
     args = p.parse_args()
@@ -153,6 +155,9 @@ def main():
         share = None if args.lan_share is None else args.lan_share == "on"
         return lan.run(base, args.state_dir, interface=args.lan_interface, once=args.lan_once, share=share,
                        netns=args.lan_netns, run_dir=run_dir)
+    if args.update:
+        from netkey import updater
+        return updater.run(base, args.state_dir)
     if args.party:
         return party_cli(args)
     if args.wifi:

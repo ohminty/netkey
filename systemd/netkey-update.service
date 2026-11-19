@@ -1,0 +1,15 @@
+[Unit]
+Description=Install the NetKey release an admin asked for in the web GUI (never automatic)
+Documentation=file:///opt/netkey/README.md
+After=network-online.target
+Wants=network-online.target
+# Not part of netkey.target: the installer restarts that target, and must not stop the update running it.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/netkey/modem.py --config /etc/netkey/config.toml --update --state-dir /var/lib/netkey
+SyslogIdentifier=netkey-update
+TimeoutStartSec=75min
+# root: the installer writes system files and restarts services. Only reachable through netkey-update.path, which
+# the web GUI triggers with a version number after checking the admin password.
+PrivateTmp=yes

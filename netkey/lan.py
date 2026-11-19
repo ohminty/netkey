@@ -49,6 +49,8 @@ LEASE_FILE = "leases"
 LEASE_TIME = "10m"
 GARP_AFTER_S = (1, 10, 45, 120)        # gateway announcements after the layout or the party's members change
 SCAN_EVERY_S = 60                      # duplicate-address scan of the retro LAN
+STATIC_SEEN_S = 900                    # a PC with a fixed address counts as connected this long after it was heard
+NAME_RETRY_S = 600                     # Windows name lookups of fixed-address PCs that didn't answer
 NM_CONF = "/etc/NetworkManager/conf.d/90-netkey-lan.conf"
 RETRO_PORT_FILE = "retro-port.json"     # state dir: MAC of the NIC last used as the retro port (kept off when disabled)
 EXTRA_PORTS_FILE = "extra-ports.json"   # state dir: MACs of extra wired adapters this box switched off
@@ -310,6 +312,8 @@ class LanDaemon:
         self.garp_due = []           # monotonic times to announce the gateway (gratuitous ARP)
         self.last_members = frozenset()
         self.conflicts = []          # IP addresses two PCs on the retro LAN answer for
+        self.static_pcs = []         # PCs with a fixed address (no DHCP lease) heard on the retro LAN
+        self.pc_names = {}           # MAC -> (NetBIOS name or None, when asked)
         self.scan_thread, self.scan_next = None, 0.0
         self.rules_sig = None
         self.wg_text = None
@@ -703,18 +707,48 @@ class LanDaemon:
         net = ipaddress.IPv4Network(a["net"])
         leases = parse_leases(read_sys(os.path.join(self.run_dir, LEASE_FILE), ""))
         ips = {l["ip"] for l in leases}
-        r = self.nsrun("ip", "-j", "neigh", "show", "dev", BRIDGE, check=False)
+        r = self.nsrun("ip", "-s", "-j", "neigh", "show", "dev", BRIDGE, check=False)
         try:
-            ips |= {n["dst"] for n in json.loads(r.stdout or "[]") if "FAILED" not in n.get("state", [])}
-        except (ValueError, TypeError, KeyError):
-            pass
+            neigh = [n for n in json.loads(r.stdout or "[]") if "FAILED" not in n.get("state", []) and n.get("lladdr")]
+        except (ValueError, TypeError):
+            neigh = []
+        ips |= {n["dst"] for n in neigh}
+        self.static_pcs = self.fixed_address_pcs(neigh, leases, a, net)
         ips = sorted((ip for ip in ips if ip != a["gateway"] and ip_in(ip, net)), key=ipaddress.IPv4Address)[:64]
         names = {l["mac"].lower(): l["hostname"] for l in leases}
         self.scan_thread = threading.Thread(target=self.scan, args=(ips, names), daemon=True, name="ip-scan")
         self.scan_thread.start()
 
+    def fixed_address_pcs(self, neigh, leases, a, net):
+        """PCs the box hears on the retro LAN without a DHCP lease from it: a fixed address set on the PC (or a
+        lease from another box that hasn't run out). Inside the DHCP range they may clash with a lease later."""
+        leased = {l["ip"] for l in leases} | {l["mac"].lower() for l in leases}
+        lo, hi = ipaddress.IPv4Address(a["dhcp_first"]), ipaddress.IPv4Address(a["dhcp_last"])
+        out = []
+        for n in neigh:
+            ip, mac = n.get("dst", ""), n["lladdr"].lower()
+            age = n.get("confirmed", n.get("updated", 0))
+            if ip == a["gateway"] or not ip_in(ip, net) or ip in leased or mac in leased or age > STATIC_SEEN_S:
+                continue
+            out.append({"ip": ip, "mac": mac, "name": (self.pc_names.get(mac) or (None,))[0],
+                        "seen": time.time() - age, "in_range": lo <= ipaddress.IPv4Address(ip) <= hi})
+        return sorted(out, key=lambda x: ipaddress.IPv4Address(x["ip"]))
+
+    def lookup_names(self):
+        """Windows (NetBIOS) names of fixed-address PCs, asked once per PC (again later if it didn't answer)."""
+        now = time.time()
+        for pc in self.static_pcs:
+            name, asked = self.pc_names.get(pc["mac"], (None, 0))
+            if name or now - asked < NAME_RETRY_S:
+                continue
+            r = self.nsrun("nmblookup", "-A", pc["ip"], check=False) if shutil.which("nmblookup") else None
+            m = re.search(r"^\s+(\S+)\s+<00>\s+-\s+[BMHP]", (r.stdout if r else "") or "", re.M)
+            self.pc_names[pc["mac"]] = (m.group(1) if m else None, now)
+            pc["name"] = m.group(1) if m else None
+
     def scan(self, ips, names):
         found = []
+        self.lookup_names()
         for ip in ips:
             if self.stopping:
                 return
@@ -1910,6 +1944,7 @@ class LanDaemon:
             "party": {k: v for k, v in party.items() if k != "code"},
             "net": self.uplink.status, "extra_nics": sorted(self.extra),
             "ip_conflicts": self.conflicts if state == "up" else [],
+            "static_pcs": self.static_pcs if state == "up" and role != "member" else [],
             "fileshare": self.share_status if state in ("up", "error") else dict(
                 self.share_status, active=False, paused=detail or "The retro-LAN port is not active"),
             "proto": self.proto_counters() if state == "up" else None, "proto_since": self.stats_since,

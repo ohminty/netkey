@@ -243,7 +243,9 @@ for u in netkey-modem.service netkey-web.service; do
     put "$unit" "/etc/systemd/system/$u" 0644 root:root
     rm -f "$unit"
 done
-for u in netkey-nat.service netkey-users.service netkey-users.path netkey-lan.service; do
+install -d -m 0755 -o root -g root /var/lib/netkey-update      # click-to-update: status, history, installers
+for u in netkey-nat.service netkey-users.service netkey-users.path netkey-lan.service netkey-update.service \
+         netkey-update.path; do
     put "$SRC/systemd/$u" "/etc/systemd/system/$u" 0644 root:root
 done
 put "$SRC/systemd/netkey.target" /etc/systemd/system/netkey.target 0644 root:root
@@ -338,7 +340,8 @@ fi
 log "Enabling"
 sysctl -q -p /etc/sysctl.d/90-netkey-forwarding.conf
 systemctl daemon-reload
-units=(netkey.target netkey-nat.service netkey-modem.service netkey-web.service netkey-users.path netkey-lan.service)
+units=(netkey.target netkey-nat.service netkey-modem.service netkey-web.service netkey-users.path netkey-lan.service
+       netkey-update.path)
 systemctl enable -q "${units[@]}"
 if ((CHANGED)); then
     systemctl restart netkey.target

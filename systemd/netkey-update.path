@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for an update an admin asked for in the netkey web GUI
+Documentation=file:///opt/netkey/README.md
+
+[Path]
+PathExists=/var/lib/netkey/update-request.json
+Unit=netkey-update.service
+
+[Install]
+WantedBy=multi-user.target

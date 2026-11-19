@@ -24,7 +24,7 @@ from . import protostats as ps
 from . import status as st
 from .config import (MODES, SETTINGS, apply_overrides, box_name, check_setting, clean_box_name, client_ip, get_setting,
                      line_mode)
-from .store import Store, read_json
+from .store import Store, read_json, write_json_atomic
 
 log = logging.getLogger("netkey")
 
@@ -185,6 +185,13 @@ class ChatWatcher(threading.Thread):
 
     def stop(self):
         self.stopping.set()
+
+
+class ApiRefusal(Exception):
+    """An API call the box refuses on purpose, with the HTTP status to answer."""
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
 
 
 class PartiesError(Exception):
@@ -423,6 +430,42 @@ class App:
         return {"model": first("/proc/device-tree/model")[:80], "os": (osr.get("PRETTY_NAME") or "")[:80],
                 "arch": os.uname().machine[:20], "ram": str(mem) if mem else "",
                 "nic": (nic.get("driver") or ("none" if lan.get("state") in ("no_nic", "disabled") else ""))[:24]}
+
+    # ---- click-to-update: the GUI only asks; netkey-update.service (root) does the work (updater.py)
+    def update_job(self):
+        """The current or last update job, short (for every status poll)."""
+        from . import updater as up
+        j = up.read_progress(up.WORK_DIR, self.state_dir)["job"]
+        return {k: j.get(k) for k in ("state", "target", "from", "message", "updated")}
+
+    def update_progress(self):
+        from . import updater as up
+        return up.read_progress(up.WORK_DIR, self.state_dir)
+
+    def request_update(self, data, ip=""):
+        """POST /api/update/install {version, password, force}: the admin password again (a sensitive action), and
+        only the release this box was told about. Writes the request; nothing else reaches the root updater."""
+        from . import updater as up
+        if not self.store.check_admin_password(str(data.get("password") or "")):
+            log.warning("web: update refused from %s: wrong admin password", ip)
+            time.sleep(1)
+            raise ApiRefusal(403, "The admin password is wrong.")
+        if self.store.admin_is_default():
+            raise ApiRefusal(403, "Change the default admin password first (Settings).")
+        if not os.path.isdir(up.WORK_DIR):
+            raise ApiRefusal(503, "This box can't update itself yet: install this update once with the update command.")
+        u = getattr(self, "_update", None) or {}
+        version = str(data.get("version") or "")
+        if not (u.get("available") and u.get("latest") == version and up.parse_version(version)):
+            raise ApiRefusal(409, "That release is not the one offered to this box. Check for updates again.")
+        if up.read_progress(up.WORK_DIR, self.state_dir)["job"].get("state") in up.RUNNING:
+            raise ApiRefusal(409, "An update is already running.")
+        write_json_atomic(os.path.join(self.state_dir, up.REQUEST_FILE),
+                          {"version": version, "force": data.get("force") is True, "requested": time.time(),
+                           "by": self.store.admin_user()}, mode=0o640)
+        log.warning("web: admin %s (%s) asked to update to NetKey %s%s", self.store.admin_user(), ip, version,
+                    " (during a party or call)" if data.get("force") is True else "")
+        return self.update_progress()
 
     def check_update(self):
         """Ask the hub which release is current (the box's version goes along, for the hub's version count)."""
@@ -675,7 +718,7 @@ class App:
             "box_name": box_name(cfg),
             "lan": self.lan_status(),
             "network": self.net_brief(),
-            "update": self.update_brief(),
+            "update": self.update_brief(), "update_job": self.update_job(),
         }
 
     def protocols(self, rng):
@@ -1037,6 +1080,8 @@ def make_handler(app, secure):
                 if not app.valid(self.token()):
                     return self.error(401, "login required")
                 return self.api(method, path, parse_qs(url.query))
+            except ApiRefusal as e:
+                return self.error(e.status, str(e))
             except ValueError as e:
                 return self.error(400, str(e))
             except (BrokenPipeError, ConnectionResetError, ssl.SSLError, socket.timeout):
@@ -1122,6 +1167,10 @@ def make_handler(app, secure):
                 return self.api_parties(method, parts[1:], query)
             if res == "update" and arg == "check" and method == "POST":
                 return self.json(200, app.check_update())
+            if res == "update" and arg == "install" and method == "POST":
+                return self.json(200, app.request_update(self.body(), self.client_address[0]))
+            if res == "update" and arg == "progress" and method == "GET":
+                return self.json(200, app.update_progress())
             if res == "network":
                 if method == "GET":
                     return self.json(200, app.net_get())

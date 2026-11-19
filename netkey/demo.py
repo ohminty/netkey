@@ -432,6 +432,47 @@ def demo_fileshare(cfg):
 
 
 class DemoApp(App):
+    # click-to-update, simulated: 0.10.8 is "out", and the updater's steps play through in the background
+    def check_update(self):
+        from .web import UPDATE_CMD, app_version
+        self._update = {"current": app_version(), "latest": "0.10.8", "available": True, "required": False,
+                        "checked": time.time(), "command": UPDATE_CMD, "error": None, "url": None, "published": None,
+                        "notes": "- Update from the web page\n- Fixed-address PCs on the LAN page\n- Faster share lists on a Pi 1"}
+        self._update_busy = False
+        return self._update
+
+    def request_update(self, data, ip=""):
+        from . import updater as up
+        default = self.store.admin_is_default
+        self.store.admin_is_default = lambda: False             # the demo signs in as admin / admin
+        try:
+            out = super().request_update(data, ip)
+        finally:
+            self.store.admin_is_default = default
+        work, req = up.WORK_DIR, os.path.join(self.state_dir, up.REQUEST_FILE)
+
+        def play():
+            cur, target, lines = self._update["current"], self._update["latest"], []
+            job = {"target": target, "from": cur, "by": "admin", "started": time.time()}
+            for state, msg, line, wait in (
+                    ("checking", f"Checking before updating {cur} to {target}", "The cloud hub offers 0.10.8", 2),
+                    ("downloading", f"Downloading NetKey {target}", f"Downloaded NetKey {target}", 3),
+                    ("installing", f"Installing NetKey {target}. The box restarts its services.", "==> Installing NetKey 0.10.8", 6),
+                    ("verifying", "Checking that everything runs", "NetKey 0.10.8 is installed and running", 3)):
+                if state == "checking" and os.path.exists(req):
+                    os.unlink(req)
+                lines.append(line)
+                up.write_json(os.path.join(work, up.STATUS_FILE), dict(job, state=state, message=msg, log=lines,
+                                                                       updated=time.time()))
+                time.sleep(wait)
+            up.write_json(os.path.join(work, up.STATUS_FILE), dict(job, state="done", message=f"Updated to {target}",
+                                                                   log=lines, updated=time.time()))
+            up.write_json(os.path.join(work, up.HISTORY_FILE), [{"from": cur, "to": target, "by": "admin",
+                                                                  "started": job["started"], "finished": time.time(),
+                                                                  "result": "updated", "message": f"{cur} to {target}"}])
+        threading.Thread(target=play, daemon=True).start()
+        return out
+
     demo = True
 
     def hub_call(self, method, path, body=None, timeout=15):
@@ -517,6 +558,8 @@ class DemoApp(App):
                             "expires": t + 21000}],
                 "rx_bytes": 5_400_000 + t % 100000 * 37, "tx_bytes": 1_200_000 + t % 100000 * 9,
                 "fileshare": demo_fileshare(self.cfg()),
+                "static_pcs": [] if p["role"] == "member" else [{"ip": "10.99.0.216", "mac": "00:a0:24:dd:7c:5f", "name": "TCI486",
+                                                                  "seen": t - 40, "in_range": True}],
                 "updated": now}
 
     def device_present(self, key):
@@ -667,6 +710,9 @@ def seed_proto_history(store, now):
 
 def setup_demo(base_cfg):
     root = tempfile.mkdtemp(prefix="netkey-demo-")
+    from . import updater
+    updater.WORK_DIR = os.path.join(root, "update")          # the simulated updater's status and history
+    os.makedirs(updater.WORK_DIR)
     state_dir, run_dir = os.path.join(root, "state"), os.path.join(root, "run")
     os.makedirs(state_dir)
     os.makedirs(run_dir)
