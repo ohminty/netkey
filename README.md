@@ -25,6 +25,8 @@ No router settings, no port forwarding, no VPN accounts. It works from behind an
 
 ## Why it actually works with old games
 
+![Three houses with retro PCs, each plugged into a NetKey box. The boxes link through a relay, or directly, into one LAN stretched across VPN: real Layer 2.](docs/how-netkey-connects.svg)
+
 Most "play old games online" tricks only pass along modern internet traffic. Old games often speak older languages:
 **IPX**, **NetBEUI**, NetBIOS. NetKey doesn't try to translate. It connects the networks at the level of the cable
 itself, so whatever your 1997 PC sends arrives on your friend's PC exactly as if a long network cable ran between
