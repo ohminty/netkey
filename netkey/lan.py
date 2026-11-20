@@ -293,6 +293,7 @@ class LanDaemon:
         self.dns_share = None
         self.cfg = base_cfg
         self.settings_mtime = None
+        self.uplink_chosen = False        # network.uplink set in the GUI (else Uplink learns it once)
         self.status = {}
         self.last_error = None
         self.party = pt.PartyState(state_dir)
@@ -361,6 +362,7 @@ class LanDaemon:
             self.settings_mtime = mtime
             data = read_json(path, {}) or {}
             self.cfg = apply_overrides(self.base, data.get("settings", {}), None, log.warning)
+            self.uplink_chosen = "network.uplink" in (data.get("settings") or {})
 
     def default_route(self):
         r = self.run("ip", "-j", "route", "show", "default", check=False)

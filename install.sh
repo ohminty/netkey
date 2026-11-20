@@ -100,7 +100,7 @@ log "Packages"
 # inside the retro-LAN namespace only. Masked before the package is installed, so they never start.
 for u in smbd.service nmbd.service samba-ad-dc.service; do
     systemctl is-active -q "$u" 2>/dev/null && systemctl stop "$u"
-    [[ "$(systemctl is-enabled "$u" 2>/dev/null)" == masked ]] || { systemctl mask -q "$u"; echo "    masked $u"; }
+    [[ "$(systemctl is-enabled "$u" 2>/dev/null)" == masked ]] || { systemctl mask -q "$u" 2>/dev/null; echo "    masked $u"; }
 done
 missing=()
 for p in "${PKGS[@]}"; do dpkg -s "$p" &>/dev/null || missing+=("$p"); done

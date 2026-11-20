@@ -183,8 +183,10 @@ def nm_split(line):
 
 
 def is_known_name(name):
-    """A saved Wi-Fi network of this box (not the hotspot, not a network still being joined)."""
-    return name == WIFI_PROFILE or (name.startswith(WIFI_PROFILE + "-") and name[len(WIFI_PROFILE) + 1:].isdigit())
+    """A saved Wi-Fi network of this box (not the hotspot, not a network still being joined). Besides the box's own
+    netkey-wifi-<n>, this is any other saved one, such as the network Raspberry Pi Imager set up ("preconfigured",
+    "netplan-wlan0-...")."""
+    return bool(name) and name not in (HOTSPOT_PROFILE, WIFI_TRIAL)
 
 
 def parse_scan(text):
@@ -242,9 +244,29 @@ class Uplink:
     def save(self):
         write_json_atomic(os.path.join(self.d.state_dir, STATE_FILE), self.state, mode=0o600)
 
+    def chosen(self):
+        """True when someone picked the uplink (in the GUI, or uplink = "wifi" in config.toml)."""
+        return bool(getattr(self.d, "uplink_chosen", False)) or self.d.cfg["network"]["uplink"] != "ethernet"
+
+    def configured(self):
+        """The uplink setting; until someone picks one, what the box was using when it first came online."""
+        return self.d.cfg["network"]["uplink"] if self.chosen() else self.state.get("auto_mode", "ethernet")
+
     def mode(self):
-        m = self.d.cfg["network"]["uplink"]
-        return "wifi" if m == "wifi" and self.wifi else "ethernet"
+        return "wifi" if self.configured() == "wifi" and self.wifi else "ethernet"
+
+    def learn_mode(self):
+        """Nobody picked the uplink yet: take the one the box came online through (set up with Raspberry Pi Imager
+        on Wi-Fi, say), once, so the GUI shows it and the built-in port is free to decide by itself."""
+        if self.chosen() or "auto_mode" in self.state:
+            return
+        routes = sorted(self.uplink_routes(), key=lambda r: r.get("metric", 0))
+        if not routes:
+            return
+        self.state["auto_mode"] = "wifi" if self.wifi and routes[0].get("dev") == self.wifi else "ethernet"
+        self.save()
+        log.info("lan: uplink not chosen yet; the box came online via %s, so that is the uplink",
+                 "Wi-Fi" if self.state["auto_mode"] == "wifi" else "Ethernet")
 
     def hotspot_password(self):
         return HOTSPOT_PASSWORD
@@ -255,6 +277,12 @@ class Uplink:
 
     def carrier(self, name):
         return read_sys(os.path.join(self.d.sys_net, name, "carrier")) == "1"
+
+    def eth_carrier(self):
+        """Cable in the built-in port, also while it sits in the party namespace (not visible in our /sys)."""
+        if os.path.exists(os.path.join(self.d.sys_net, self.eth)):
+            return self.carrier(self.eth)
+        return "LOWER_UP" in self.d.ns_links().get(self.eth, {}).get("flags", [])
 
     def uplink_routes(self):
         return [r for r in self.d.default_route() if r.get("dev") != VETH_MAIN]
@@ -572,6 +600,7 @@ class Uplink:
     # every daemon step (before the LAN logic, also when the LAN port is switched off)
     def tick(self):
         self.refresh_ports()
+        self.learn_mode()
         now = time.monotonic()
         if self.wifi and self.mode() == "wifi" and now - self.last_radio >= 30 and \
                 self.wifi_info.get("state") in (None, "unavailable"):
@@ -587,16 +616,19 @@ class Uplink:
 
     def build_status(self, now):
         routes = self.uplink_routes()
-        eth_role = None
+        eth_role, eth_carrier = None, False
         if self.eth:
+            eth_carrier = self.eth_carrier()
             if self.mode() == "ethernet":
                 eth_role = "uplink"
             elif self.mgmt == self.eth:
                 eth_role = "management"
+            elif not eth_carrier:
+                eth_role = "unplugged"
             elif self.d.nic == self.eth:
                 eth_role = "retro" if self.d.nic_ok else "checking"
             else:
-                eth_role = "unplugged" if not self.carrier(self.eth) else "checking"
+                eth_role = "checking"
         eth_ip = None
         if self.eth and eth_role in ("uplink", "management"):
             r = self.run("ip", "-j", "-4", "addr", "show", "dev", self.eth)
@@ -606,13 +638,13 @@ class Uplink:
             except ValueError:
                 pass
         self.status = {
-            "mode": self.mode(), "configured_mode": self.d.cfg["network"]["uplink"],
+            "mode": self.mode(), "configured_mode": self.configured(), "mode_chosen": self.chosen(),
             "wifi_available": bool(self.wifi), "uplink_ok": bool(routes),
             "uplink_dev": routes[0]["dev"] if routes else None,
             "uplink_lost_for": int(now - self.lost_since) if self.lost_since else None,
             "wifi": dict(self.wifi_info, iface=self.wifi, country=self.state.get("country")) if self.wifi else None,
             "ethernet": {"name": self.eth, "role": eth_role, "ip": eth_ip,
-                         "carrier": self.carrier(self.eth) if self.eth else False} if self.eth else None,
+                         "carrier": eth_carrier} if self.eth else None,
             "hotspot": {"enabled": bool(self.d.cfg["network"]["hotspot"]) and bool(self.wifi), "state": self.hotspot,
                         "ssid": self.hotspot_ssid() if self.wifi else None, "address": HOTSPOT_ADDR.split("/")[0],
                         "clients": self.clients() if self.hotspot == "on" else 0,
