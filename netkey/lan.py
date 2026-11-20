@@ -1514,7 +1514,10 @@ class LanDaemon:
 
     def command(self, c):
         if str(c.get("cmd", "")).startswith("wifi_"):
-            return self.uplink.command(c)
+            try:
+                return self.uplink.command(c)
+            finally:                # the GUI reads the network status with the result: make it current
+                self.uplink.build_status(time.monotonic())
         cmd, role = c["cmd"], self.party.role
         need = {"create": "standalone", "join": "standalone", "approve": "host", "reject": "host", "kick": "host",
                 "regenerate": "host", "close": "host", "endpoint": "host", "leave": "member", "relays": None,
@@ -1954,19 +1957,27 @@ class LanDaemon:
         }
         os.makedirs(self.run_dir, exist_ok=True)
         os.chmod(self.run_dir, 0o755)
-        write_json_atomic(os.path.join(self.run_dir, STATUS_FILE), self.status, mode=0o644)
-        party["updated"] = time.time()
-        path = os.path.join(self.run_dir, pt.PARTY_FILE)
-        write_json_atomic(path, party, mode=0o640)       # contains the invite code: root + group netkey only
-        net = os.path.join(self.run_dir, NET_FILE)
-        write_json_atomic(net, dict(self.uplink.private_status(), updated=time.time()), mode=0o640)  # hotspot pw
         try:
             import grp
             gid = grp.getgrnam("netkey").gr_gid
-            os.chown(path, 0, gid)
-            os.chown(net, 0, gid)
-        except (KeyError, PermissionError):
-            pass
+        except KeyError:
+            gid = None
+
+        def group_readable(path):                       # root + group netkey only (the GUI runs as netkey)
+            if gid is not None:
+                try:
+                    os.chown(path, 0, gid)
+                except PermissionError:
+                    pass
+        # net.json before the party file: that one carries command results, and the GUI reads net.json right after
+        net = os.path.join(self.run_dir, NET_FILE)
+        write_json_atomic(net, dict(self.uplink.private_status(), updated=time.time()), mode=0o640)  # hotspot pw
+        group_readable(net)
+        write_json_atomic(os.path.join(self.run_dir, STATUS_FILE), self.status, mode=0o644)
+        party["updated"] = time.time()
+        path = os.path.join(self.run_dir, pt.PARTY_FILE)
+        write_json_atomic(path, party, mode=0o640)       # contains the invite code
+        group_readable(path)
 
     # main loop
     def step(self):

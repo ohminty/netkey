@@ -505,7 +505,7 @@ const RESULTS = {
 };
 const LAN_STATES = {
   up: { label: "Active", cls: "green" },
-  no_nic: { label: "No adapter", cls: "gray" },
+  no_nic: { label: "No port", cls: "gray" },
   disabled: { label: "Off", cls: "gray" },
   error: { label: "Error", cls: "red" },
   stopped: { label: "Service not running", cls: "gray" },
@@ -637,7 +637,7 @@ function kpis(st, pub) {
   const p = up ? partyState() : null, role = p && p.role;
   const pct = (a, b) => (b ? Math.min(100, Math.round((a / b) * 100)) : 0);
   const pcs = lanPcCount(lan);
-  const lanText = !lan ? "Not available on this box" : lan.state === "no_nic" ? "No USB Ethernet adapter" : lan.state === "disabled" ? "The LAN port is off"
+  const lanText = !lan ? "Not available on this box" : lan.state === "no_nic" ? "No retro-LAN port yet" : lan.state === "disabled" ? "The LAN port is off"
     : lan.state === "stopped" ? "LAN service not running" : lan.state === "error" ? lan.detail || "The LAN port has a problem" : "";
   // 1 · LAN party
   let party;
@@ -810,6 +810,7 @@ const Dashboard = {
     const lines = st ? st.lines : null;
     const s = st && st.summary;
     patch(view, html`<div class="stack">
+      ${getStartedCard(st)}
       ${st ? kpis(st, this.pub) : kpiSkeleton()}
       <section aria-labelledby="h-traffic">
         <div class="section-head"><h2 id="h-traffic">Retro LAN</h2><span class="sub">${S.range === "live" ? "last 15 minutes · 5 s samples" : S.range === "1h" ? "per minute" : S.range === "24h" ? "10-minute buckets" : "hourly buckets"}</span><span class="spacer"></span>
@@ -901,6 +902,7 @@ const Dashboard = {
     }) });
   },
   actions: {
+    "gs-hide"() { setStarted(); this.render(); },
     range(btn) {
       const r = btn.dataset.value;
       if (r === S.range) return;
@@ -917,6 +919,44 @@ const Dashboard = {
 const diagram = (nodes) => html`<div class="diagram" aria-hidden="true">${nodes.map((n) => (n.link
   ? html`<span class="dg-link ${n.link}"><small>${n.label || ""}</small></span>`
   : html`<span class="dg-node"><span class="box ${n.cls || ""}">${icon(n.icon)}</span>${n.label}</span>`))}</div>`;
+
+// After switching the uplink to Wi-Fi: the address to keep, and what the built-in Ethernet port does now.
+function wifiUplinkDialog(n) {
+  const w = (n && n.wifi) || {}, eth = (n && n.ethernet) || {};
+  const host = (S.session && S.session.hostname) || "";
+  const wifiUrl = `https://${w.ip}/`, onCable = !!eth.ip && location.hostname === eth.ip, onWifi = !onCable;
+  const now = eth.role === "management" ? html`Right now its cable goes to your home network, so the box is also reachable at <span class="mono">${eth.ip || "a second address"}</span>.`
+    : eth.role === "retro" ? html`Right now it is cabled to retro PCs: they are on the retro LAN.`
+    : html`Right now nothing is plugged in.`;
+  const row = (ic, cls, title, text) => html`<li><span class="wu-ic ${cls}">${icon(ic)}</span><span><b>${title}</b> ${text}</span></li>`;
+  openModal({
+    title: "Wi-Fi is now the uplink", iconName: "wifi", wide: true,
+    body: html`<div class="wu">
+      <p>The box goes online through <b>${w.ssid || "your Wi-Fi"}</b>. To manage it from now on, use its Wi-Fi address.</p>
+      <div class="wu-addr">
+        <div><small>Wi-Fi address</small><a class="mono" href="${wifiUrl}">${wifiUrl}</a>
+          ${host ? html`<span class="faint">or <span class="mono">https://${host}.local/</span> on most computers</span>` : ""}</div>
+        <button type="button" class="btn btn-sm" data-wu-copy>${icon("copy")}Copy</button>
+      </div>
+      ${onWifi ? "" : html`<div class="banner banner-warn" role="status">${icon("info")}<span>You are connected through the cable address <span class="mono">${location.hostname}</span>. It stops working when you move the cable, so bookmark the Wi-Fi address and continue there.</span></div>`}
+      <h3 class="wu-h">How the box is connected now</h3>
+      ${diagram([{ icon: "home", label: "Your router" }, { link: "wifi", label: "Wi-Fi" }, { icon: "pi", label: "NetKey", cls: "pi" },
+        { link: "cable", label: "Ethernet cable" }, { icon: "pc", label: "Retro PCs", cls: "phys" }])}
+      <h3 class="wu-h">The built-in Ethernet port is now free</h3>
+      <ul class="wu-list">
+        ${row("pc", "phys", "Cable it to a retro PC", "or to a switch with several. They get an address from the box and play on the retro LAN, kept apart from your home network.")}
+        ${row("home", "", "Cable it to your router", "and it becomes a management port: the box gets a second address, handy as a backup.")}
+        ${row("swap", "", "Move the cable any time.", "The box notices within a few seconds and works out where it goes. No settings to change.")}
+      </ul>
+      <p class="faint wu-now">${icon("ethernet", "i-sm")} ${now}</p>
+    </div>`,
+    foot: html`${onWifi ? "" : html`<a class="btn" href="${wifiUrl}#/network">${icon("external")}Open the Wi-Fi address</a>`}<span class="spacer"></span>
+      <button type="submit" class="btn btn-primary">Got it</button>`,
+    initialFocus: '[type="submit"]',
+  }).el.querySelector("[data-wu-copy]").addEventListener("click", async () => {
+    toast((await copyText(wifiUrl)) ? "Address copied" : "Could not copy: select it and copy by hand");
+  });
+}
 
 // Default modem mode picker (Modem page): applies at once, like the switches on the LAN page.
 function defaultModePicker(mode, busy) {
@@ -1047,6 +1087,46 @@ const Lines = {
 
 // page: LAN (retro-LAN port)
 const LAN_NO_NIC_TEXT = "Plug a USB Ethernet adapter into the Pi to create a retro LAN port. Retro PCs with a network card connect to it directly or through a hub.";
+// No retro-LAN port yet: what this box can do about it (free the built-in port via Wi-Fi, move its cable, or a USB adapter).
+function retroPortHint(net) {
+  const n = net || {}, eth = n.ethernet || {};
+  if (n.mode === "wifi" && eth.role === "management") {
+    return { title: "The Ethernet port goes to your router", text: "Wi-Fi is the uplink, so the built-in Ethernet port can be the retro-LAN port: move its cable from your router to a retro PC, or to a switch with several. Or plug in a USB Ethernet adapter.", href: "", cta: "" };
+  }
+  if (n.wifi_available && n.mode !== "wifi") {
+    return { title: "No port for retro PCs yet", text: "Connect the box to your Wi-Fi: the built-in Ethernet port then becomes the retro-LAN port. Or plug in a USB Ethernet adapter and keep the box on its cable.", href: "#/network", cta: "Set up Wi-Fi" };
+  }
+  return { title: "No USB Ethernet adapter", text: LAN_NO_NIC_TEXT, href: "", cta: "" };
+}
+
+// Dashboard: three steps from a fresh box to a retro PC on the retro LAN. Gone once a PC has shown up (or hidden).
+const STARTED_KEY = "netkey-started";
+function startedDone() { try { return localStorage.getItem(STARTED_KEY) === "1"; } catch { return false; } }
+function setStarted() { try { localStorage.setItem(STARTED_KEY, "1"); } catch { /* private window: shows again */ } }
+function getStartedCard(st) {
+  if (!st || !st.lan || startedDone()) return "";
+  const net = st.network || {}, lan = st.lan, w = net.wifi || {};
+  const pcs = lanPcCount(lan);
+  if (pcs > 0 || (lan.role && lan.role !== "standalone")) { setStarted(); return ""; }   // done: a PC is on the LAN
+  const online = !!net.uplink_ok, port = lan.state === "up" || lan.state === "disabled";
+  const hint = retroPortHint(net);
+  const step = (n, done, active, title, text, action = "") => html`<li class="gs-step ${done ? "is-done" : active ? "is-now" : ""}">
+      <span class="gs-num">${done ? icon("check", "i-sm") : n}</span>
+      <div><b>${title}</b><p>${text}</p>${action}</div></li>`;
+  const via = net.mode === "wifi" && w.ssid ? html`Online via Wi-Fi <b>${w.ssid}</b>.` : "Online via the Ethernet cable.";
+  return html`<section class="card gs" aria-labelledby="h-gs" data-key="gs">
+    <div class="gs-head"><div><h2 id="h-gs">Get started</h2><span class="sub">Three steps to a retro PC on the retro LAN</span></div>
+      <button type="button" class="btn btn-ghost btn-sm" data-action="gs-hide">Hide</button></div>
+    <ol class="gs-steps">
+      ${step(1, online, !online, "Box online", online ? via : "Connect the box to your router with a cable, or set up Wi-Fi.", online ? "" : html`<a class="btn btn-sm" href="#/network">Network</a>`)}
+      ${step(2, port, online && !port, port ? "Retro-LAN port ready" : hint.title, port ? html`Port <span class="mono">${(lan.nic && lan.nic.name) || "ready"}</span> waits for your retro PCs.` : hint.text,
+        !port && hint.href ? html`<a class="btn btn-sm btn-primary" href="${hint.href}">${hint.cta}</a>` : "")}
+      ${step(3, false, port, "Plug in a retro PC", "Cable it to the retro-LAN port, or to a switch with several. Let it get its address automatically (DHCP): it shows up on the LAN page.",
+        port ? html`<a class="btn btn-sm btn-primary" href="#/lan">Open the LAN page</a>` : "")}
+    </ol>
+    <p class="faint gs-next">${icon("parties", "i-sm")} Then host a LAN party or join one: <a href="#/parties">Parties</a></p>
+  </section>`;
+}
 const LAN_ONLY_TEXT = "LAN only: PCs can talk to each other (IPX, NetBEUI, TCP/IP) but not reach the internet.";
 const LAN_SHARE_TEXT = "Retro-LAN PCs will reach the internet through this Pi. All their traffic leaves from your internet connection and IP address.";
 const ipNum = (ip) => String(ip || "").split(".").reduce((a, x) => a * 256 + (Number(x) || 0), 0);
@@ -1198,13 +1278,16 @@ const Lan = {
       : lan.state === "up" && p.role === "member" ? `Part of ${partyName(p)}'s LAN party: the host hands out addresses`
       : lan.state === "up" ? (n ? `${n} PC${n === 1 ? "" : "s"} connected · isolated network with its own DHCP` : "Isolated network with its own DHCP and DNS, waiting for PCs")
       : lan.state === "disabled" ? "The LAN party port is turned off"
-      : lan.state === "no_nic" ? "Waiting for a second Ethernet adapter"
+      : lan.state === "no_nic" ? "Waiting for a retro-LAN port"
       : lan.state === "stopped" ? "The retro-LAN service is not running"
       : "The retro-LAN port could not be set up";
     const cls = lan.state === "up" ? "is-up" : lan.state === "error" ? "is-error" : "is-off";
     const applying = Object.keys(this.opt).length;
     let body;
-    if (lan.state === "no_nic") body = emptyState("ethernet", "No USB Ethernet adapter", LAN_NO_NIC_TEXT);
+    if (lan.state === "no_nic") {
+      const h = retroPortHint(S.status && S.status.network);
+      body = emptyState("ethernet", h.title, h.text, h.href ? html`<a class="btn btn-primary" href="${h.href}">${h.cta}</a>` : "");
+    }
     else if (lan.state === "stopped" && !nic) body = emptyState("alert", "Retro-LAN service stopped", lan.detail || "The Pi's network helper is not running, so the retro-LAN port is inactive.");
     else {
       const r = S.lanRate, up = lan.state === "up";
@@ -1257,7 +1340,7 @@ const Lan = {
       </label></div>`;
     return html`<section class="grid grid-2 lan-toggles" aria-label="Retro-LAN switches">
       ${card("lan.enabled", "lan-sw-enabled", "ethernet", "LAN party port",
-        en ? (lan.state === "no_nic" ? "On: waiting for a USB Ethernet adapter." : "On: the second Ethernet port is an isolated retro LAN with DHCP.") : "Off: the second Ethernet port is not used.", en)}
+        en ? (lan.state === "no_nic" ? "On: waiting for a retro-LAN port." : "On: the second Ethernet port is an isolated retro LAN with DHCP.") : "Off: the second Ethernet port is not used.", en)}
       ${card("lan.share_internet", "lan-sw-share", "globe", "Share my internet with the LAN", shareText, share, share ? "is-share" : "")}
     </section>`;
   },
@@ -1356,7 +1439,7 @@ const Lan = {
       <span class="pv-radio" aria-hidden="true"></span>
       <span class="pv-t"><b>${icon(v === "hub" ? "cloud" : "swap", "i-sm")}${title}${extra}</b><small>${text}</small></span></label>`;
     const portNote = lan.state === "disabled" ? "Turn on the LAN party port above first, a party links this box's retro-LAN port."
-      : lan.state === "no_nic" ? "Plug a USB Ethernet adapter into the Pi first, a party links its retro-LAN port." : "";
+      : lan.state === "no_nic" ? "Set up a retro-LAN port first (see the LAN page): a party links it." : "";
     return html`<section class="card party-card" data-key="party-standalone" aria-labelledby="h-party">
       <div class="card-head">${icon("network")}<h3 id="h-party">LAN party</h3><span class="sub">Up to 16 boxes on one LAN</span></div>
       <div class="party-pad">
@@ -1970,7 +2053,7 @@ const Parties = {
   startCards(lan) {
     const dis = this.busy ? raw("disabled") : "";
     const portNote = lan.state === "disabled" ? html`Turn on the <a href="#/lan">LAN party port</a> first: a party links this box's retro-LAN port.`
-      : lan.state === "no_nic" ? "Plug a USB Ethernet adapter into the Pi first: a party links its retro-LAN port." : "";
+      : lan.state === "no_nic" ? "Set up a retro-LAN port first (see the LAN page): a party links it." : "";
     return html`${portNote ? html`<div class="banner banner-warn lan-banner" role="status" data-key="port-note">${icon("info")}<span>${portNote}</span></div>` : ""}
     <div class="start-grid" data-key="start">
       <section class="card start-card">
@@ -2185,7 +2268,7 @@ const Parties = {
       <span class="pv-t"><b>${icon(ic, "i-sm")}${title}</b><small>${text}</small></span></label>`;
     const busy = this.busy === "create" || this.busy === "plan";
     const label = pub ? (f.when === "now" ? "Start public party" : "Publish event") : "Start party";
-    const portNote = lan.state === "disabled" ? "The LAN party port is off (LAN page)." : lan.state === "no_nic" ? "No USB Ethernet adapter for the retro LAN yet." : "";
+    const portNote = lan.state === "disabled" ? "The LAN party port is off (LAN page)." : lan.state === "no_nic" ? "No retro-LAN port yet (see the LAN page)." : "";
     return html`<div class="stack"><a class="back" href="#/parties">${icon("chevron")}Parties</a>
       ${p.role === "host" || p.role === "member" ? html`<div class="banner banner-warn lan-banner">${icon("info")}<span>This box is already in a party. ${p.role === "host" ? "Close it" : "Leave it"} before hosting another (you can still plan an event).</span></div>` : ""}
       ${portNote ? html`<div class="banner banner-warn lan-banner">${icon("info")}<span>${portNote} A party links this box's retro-LAN port.</span></div>` : ""}
@@ -2629,15 +2712,16 @@ const Network = {
     this.lost = "";
     const { res, err } = await this.cmd("wifi_connect", { ssid, password: pw, country: this.form.country });
     if (res) {
-      const hint = !this.wantWifi && this.modeValue() !== "wifi" ? "Wi-Fi is ready: choose Wi-Fi as the uplink above to use it." : "";
+      // came here through "Wi-Fi" as the uplink: switch once joined (the result says it joined, even if the
+      // status lags a moment behind)
+      const want = this.wantWifi && this.modeValue() !== "wifi";
+      this.wantWifi = false;
+      const hint = !want && this.modeValue() !== "wifi" ? "Wi-Fi is ready: choose Wi-Fi as the uplink above to use it." : "";
       toast((res.result && res.result.message) || `Connected to ${ssid}`, { detail: hint });
       this.sel = null;
       this.form.password = "";
       this.form.show = false;
-      if (this.wantWifi && wifiUp(this.net)) {
-        this.wantWifi = false;
-        await this.saveMode("wifi");
-      }
+      if (want) await this.saveMode("wifi");
     } else if (err.status === 0) {
       this.lost = ssid;
     } else if (err.status !== 401) {
@@ -2651,10 +2735,13 @@ const Network = {
     try {
       await api("/api/settings", { method: "PUT", body: { values: { "network.uplink": value } } });
       this.opt.mode = { value, saving: false, until: Date.now() + 15000 };
-      toast(value === "wifi" ? "Uplink switched to Wi-Fi" : "Uplink switched to Ethernet", {
-        detail: value === "wifi" ? "The built-in Ethernet port now works out by itself whether it is a retro-LAN or management port."
-          : "The built-in Ethernet port connects the box to your network.",
-      });
+      if (value === "wifi" && wifiUp(this.net)) wifiUplinkDialog(this.net);
+      else {
+        toast(value === "wifi" ? "Uplink switched to Wi-Fi" : "Uplink switched to Ethernet", {
+          detail: value === "wifi" ? "The built-in Ethernet port now works out by itself whether it is a retro-LAN or management port."
+            : "The built-in Ethernet port connects the box to your network.",
+        });
+      }
       refreshStatus();
       this.load();
     } catch (e) {
@@ -2684,7 +2771,8 @@ const Network = {
     }
     const w = n.wifi || {}, hs = n.hotspot || {}, eth = n.ethernet || {}, home = n.home || {};
     const hsOn = hs.state === "on";
-    const viaWifi = n.uplink_ok && (n.uplink_dev ? n.uplink_dev === w.iface : n.mode === "wifi");
+    // Wi-Fi chosen and joined reads as Wi-Fi, also while a cable into the router (management port) carries traffic
+    const viaWifi = n.uplink_ok && ((n.mode === "wifi" && wifiUp(n)) || (n.uplink_dev ? n.uplink_dev === w.iface : n.mode === "wifi"));
     const none = html`<span class="faint">—</span>`;
     const mono = (v) => (v ? html`<span class="mono">${v}</span>` : none);
     const fact = (label, value, extra = "") => html`<div><small>${label}</small><b>${value}</b>${extra ? html`<span class="faint">${extra}</span>` : ""}</div>`;

@@ -432,10 +432,13 @@ def demo_fileshare(cfg):
 
 
 class DemoApp(App):
-    # click-to-update, simulated: 0.10.8 is "out", and the updater's steps play through in the background
+    # click-to-update, simulated: the next patch version is "out", and the updater's steps play through
     def check_update(self):
         from .web import UPDATE_CMD, app_version
-        self._update = {"current": app_version(), "latest": "0.10.8", "available": True, "required": False,
+        cur = app_version()
+        parts = cur.split("-")[0].split(".")
+        latest = ".".join(parts[:2] + [str(int(parts[2]) + 1)]) if len(parts) == 3 and parts[2].isdigit() else "1.0.0"
+        self._update = {"current": cur, "latest": latest, "available": True, "required": False,
                         "checked": time.time(), "command": UPDATE_CMD, "error": None, "url": None, "published": None,
                         "notes": "- Update from the web page\n- Fixed-address PCs on the LAN page\n- Faster share lists on a Pi 1"}
         self._update_busy = False
@@ -455,10 +458,10 @@ class DemoApp(App):
             cur, target, lines = self._update["current"], self._update["latest"], []
             job = {"target": target, "from": cur, "by": "admin", "started": time.time()}
             for state, msg, line, wait in (
-                    ("checking", f"Checking before updating {cur} to {target}", "The cloud hub offers 0.10.8", 2),
+                    ("checking", f"Checking before updating {cur} to {target}", f"The cloud hub offers {target}", 2),
                     ("downloading", f"Downloading NetKey {target}", f"Downloaded NetKey {target}", 3),
-                    ("installing", f"Installing NetKey {target}. The box restarts its services.", "==> Installing NetKey 0.10.8", 6),
-                    ("verifying", "Checking that everything runs", "NetKey 0.10.8 is installed and running", 3)):
+                    ("installing", f"Installing NetKey {target}. The box restarts its services.", f"==> Installing NetKey {target}", 6),
+                    ("verifying", "Checking that everything runs", f"NetKey {target} is installed and running", 3)):
                 if state == "checking" and os.path.exists(req):
                     os.unlink(req)
                 lines.append(line)
