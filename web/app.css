@@ -21,7 +21,7 @@
   --border-2: #2d3640;
   --text: #e7edf3;
   --text-2: #a1adb9;
-  --text-3: #6c7884;
+  --text-3: #8a95a1;
   --accent: #3ddc84;
   --accent-2: #2fbf70;
   --accent-fg: #03170b;
@@ -52,7 +52,7 @@
   --border-2: #d2d7de;
   --text: #0e141b;
   --text-2: #4a5562;
-  --text-3: #808b97;
+  --text-3: #657080;
   --accent: #1b8a4b;
   --accent-2: #166f3c;
   --accent-fg: #ffffff;
@@ -1033,6 +1033,14 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
 .btn.is-busy { position: relative; color: transparent !important; }
 .btn.is-busy::after { content: ""; position: absolute; width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--accent-fg); border-right-color: transparent; animation: spin .7s linear infinite; }
 
+/* touch screens: keep icons small but make the tap area 44px */
+@media (pointer: coarse) {
+  .btn-icon, .btn-sm.btn-icon, .input-btn, .input-btns button { position: relative; }
+  .btn-icon::before, .btn-sm.btn-icon::before, .input-btn::before, .input-btns button::before {
+    content: ""; position: absolute; inset: -8px; min-width: 44px; min-height: 44px;
+  }
+}
+
 /* phones: tables become stacked cards */
 @media (max-width: 640px) {
   .users-table thead, .calls-table thead { display: none; }
@@ -1440,3 +1448,13 @@ a.file-name:hover, button.file-name:hover b { text-decoration: underline; }
 .dot-green { background: var(--accent); } .dot-amber { background: var(--amber); } .dot-gray { background: var(--text-3); }
 .book-form { display: grid; grid-template-columns: minmax(0, 1fr) 130px auto auto; gap: 8px; align-items: center; }
 @media (max-width: 640px) { .book-form { grid-template-columns: 1fr 1fr; } }
+
+/* settings: find box (filters the rows below, and says where moved settings live) */
+.find-setting { max-width: 520px; }
+
+/* banners on phones: text gets the full row, buttons wrap under it */
+@media (max-width: 640px) {
+  .banner { flex-wrap: wrap; }
+  .banner > span { flex: 1 1 200px; min-width: 0; }
+  .banner > .btn { margin-left: auto; }
+}

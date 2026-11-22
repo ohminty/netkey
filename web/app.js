@@ -591,7 +591,7 @@ function renderChrome() {
   const updating = uj && (UPDATE_RUNNING.includes(uj.state) || (uj.state === "done" && up && uj.target === up.latest));
   if (up && up.available && !updating && currentName === "dashboard" && (up.required || updateDismissed() !== up.latest)) {   // the Dashboard only
     banners.push(html`<div class="banner ${up.required ? "banner-warn" : ""}" role="status" data-key="upd-${up.latest}">${icon(up.required ? "alert" : "download")}<span><b>${up.required ? `Update required: NetKey ${up.latest}` : `NetKey ${up.latest} is available.`}</b> <span class="muted">${up.required ? `The cloud hub needs a newer version than ${up.current} for parties.` : `This box runs ${up.current}. Nothing updates by itself.`}</span></span>
-      <button type="button" class="btn btn-sm btn-primary" data-action="update-now">Update now</button><button type="button" class="btn btn-sm btn-ghost" data-action="update-howto">Manually</button>${up.required ? "" : html`<button type="button" class="btn btn-sm btn-ghost" data-action="update-later">Later</button>`}</div>`);
+      <button type="button" class="btn btn-sm btn-primary" data-action="update-now">Update now</button><button type="button" class="btn btn-sm btn-ghost" data-action="update-howto">Show command</button>${up.required ? "" : html`<button type="button" class="btn btn-sm btn-ghost" data-action="update-later">Hide</button>`}</div>`);
   }
   const job = st && st.update_job;
   if (job && UPDATE_RUNNING.includes(job.state)) {
@@ -603,7 +603,7 @@ function renderChrome() {
       <button type="button" class="btn btn-sm btn-ghost" data-action="update-progress">Details</button><button type="button" class="btn btn-sm btn-ghost" data-action="update-seen" data-t="${job.updated}">Dismiss</button></div>`);
   }
   if (!S.online) banners.push(html`<div class="banner banner-warn" role="status">${spinner()}<span><b>Connection lost.</b> <span class="muted">Retrying… the values below may be stale.</span></span></div>`);
-  if (st && st.admin && st.admin.default_credentials) banners.push(html`<div class="banner banner-warn" role="alert">${icon("lock")}<span><b>Default login in use.</b> <span class="muted">Anyone on your network can sign in with admin / admin.</span> <a href="#/settings">Change it in Settings</a></span></div>`);
+  if (st && st.admin && st.admin.default_credentials && currentName !== "settings") banners.push(html`<div class="banner banner-warn" role="alert">${icon("lock")}<span><b>Default login is still set.</b> <span class="muted">Anyone on your network can use admin / admin.</span> <a href="#/settings">Change it</a></span></div>`);
   if (st && st.service.manager === "stopped") banners.push(html`<div class="banner banner-err" role="alert">${icon("alert")}<span><b>Modem service is not running.</b> <span class="muted">No line can answer calls. Start it on the Pi with <code>sudo systemctl start netkey-modem</code>.</span></span></div>`);
   patch($("#banners"), html`${banners}`);
 }
@@ -829,17 +829,6 @@ const Dashboard = {
     patch(view, html`<div class="stack">
       ${getStartedCard(st)}
       ${st ? kpis(st, this.pub) : kpiSkeleton()}
-      <section aria-labelledby="h-traffic">
-        <div class="section-head"><h2 id="h-traffic">Retro LAN</h2><span class="sub">${S.range === "live" ? "last 15 minutes · 5 s samples" : S.range === "1h" ? "per minute" : S.range === "24h" ? "10-minute buckets" : "hourly buckets"}</span><span class="spacer"></span>
-          ${segmented(ranges, S.range, 'data-action="range"', "", "Time range")}</div>
-        <div class="stack" style="gap:16px">
-          ${st && st.lan && st.lan.state === "up" ? html`<div class="card chart-card">
-            <div class="card-head"><h3>Retro LAN throughput</h3><div class="legend"><span><i class="sw" style="background:${cssVar("--accent")}"></i>From your PCs</span>${st.lan.role && st.lan.role !== "standalone" ? html`<span><i class="sw" style="background:${cssVar("--blue")}"></i>From the party</span>` : ""}</div></div>
-            <div class="chart-body"><div class="chart" id="ch-lan" data-skip></div></div>
-          </div>` : ""}
-          ${protocolCard(this.protos[S.range], st && st.lan)}
-        </div>
-      </section>
       <section aria-labelledby="h-lines">
         <div class="section-head"><h2 id="h-lines">Modem</h2>${s ? html`<span class="sub">${s.connected} connected · ${fmtNum(s.calls_today)} call${s.calls_today === 1 ? "" : "s"} today${s.failed_logins_today ? html` · <span class="bad">${s.failed_logins_today} failed login${s.failed_logins_today === 1 ? "" : "s"}</span>` : ""} · ${fmtBytes(s.bytes_today)} today</span>` : ""}
           <span class="spacer"></span><a class="btn btn-ghost btn-sm" href="#/modem">Manage lines ${icon("chevron", "i-sm")}</a></div>
@@ -867,6 +856,17 @@ const Dashboard = {
               : this.recent.length ? recentCallsTable(this.recent, { compact: true })
               : emptyState("phone", "No calls yet", "Dial in from a retro PC and the call will show up here.")}
           </section>
+        </div>
+      </section>
+      <section aria-labelledby="h-traffic">
+        <div class="section-head"><h2 id="h-traffic">Retro LAN</h2><span class="sub">${S.range === "live" ? "last 15 minutes · 5 s samples" : S.range === "1h" ? "per minute" : S.range === "24h" ? "10-minute buckets" : "hourly buckets"}</span><span class="spacer"></span>
+          ${segmented(ranges, S.range, 'data-action="range"', "", "Time range")}</div>
+        <div class="stack" style="gap:16px">
+          ${st && st.lan && st.lan.state === "up" ? html`<div class="card chart-card">
+            <div class="card-head"><h3>Retro LAN throughput</h3><div class="legend"><span><i class="sw" style="background:${cssVar("--accent")}"></i>From your PCs</span>${st.lan.role && st.lan.role !== "standalone" ? html`<span><i class="sw" style="background:${cssVar("--blue")}"></i>From the party</span>` : ""}</div></div>
+            <div class="chart-body"><div class="chart" id="ch-lan" data-skip></div></div>
+          </div>` : ""}
+          ${protocolCard(this.protos[S.range], st && st.lan)}
         </div>
       </section>
     </div>`);
@@ -2807,7 +2807,7 @@ const WIFI_COUNTRIES = [["NO", "Norway"], ["SE", "Sweden"], ["DK", "Denmark"], [
   ["NZ", "New Zealand"], ["JP", "Japan"]];
 const OTHER_NET = { other: true };
 const ETH_ROLES = {
-  uplink: { label: "Uplink", text: "Connects this box to your network and the internet." },
+  uplink: { label: "Internet", text: "Connects this box to your network and the internet." },
   management: { label: "Management port (home network)", text: "Cabled into your home network, the web GUI is reachable on this address too." },
   retro: { label: "Retro-LAN port", text: "Cabled to retro PCs, they get the isolated retro LAN with its own DHCP." },
   checking: { label: "Checking…", text: "Finding out whether the cable goes to your router or to retro PCs…" },
@@ -2825,7 +2825,7 @@ const wifiError = (msg) => (/secrets were required|psk|802-11-wireless-security/
   ? `The Wi-Fi password seems to be wrong. ${msg}` : msg);
 
 const Network = {
-  title: "Uplink",
+  title: "Internet",
   mount() {
     this.net = null;
     this.loadErr = "";
@@ -2960,7 +2960,7 @@ const Network = {
       this.opt.mode = { value, saving: false, until: Date.now() + 15000 };
       if (value === "wifi" && wifiUp(this.net)) wifiUplinkDialog(this.net);
       else {
-        toast(value === "wifi" ? "Uplink switched to Wi-Fi" : "Uplink switched to Ethernet", {
+        toast(value === "wifi" ? "Internet switched to Wi-Fi" : "Internet switched to Ethernet", {
           detail: value === "wifi" ? "The built-in Ethernet port now works out by itself whether it is a retro-LAN or management port."
             : "The built-in Ethernet port connects the box to your network.",
         });
@@ -3030,7 +3030,7 @@ const Network = {
       else msg = html`The rescue hotspot ${hsName} opens shortly.`;
       banner = html`<div class="banner ${hsOn ? "banner-warn" : "banner-err"} lan-banner" role="status">${icon(hsOn ? "hotspot" : "alert")}<span>${msg}</span></div>`;
       const ethRole = ETH_ROLES[eth.role];
-      facts = [fact("Uplink", n.mode === "wifi" ? "Wi-Fi" : "Ethernet"),
+      facts = [fact("Connected via", n.mode === "wifi" ? "Wi-Fi" : "Ethernet"),
         fact("Wi-Fi", !n.wifi_available ? html`<span class="faint">Not available</span>` : w.state === "connecting" ? html`Connecting to ${w.ssid || "…"}` : w.configured ? html`${w.ssid || "Saved network"} <span class="faint">· ${humanize(w.state || "unknown")}</span>` : html`<span class="faint">Not set up</span>`),
         fact("Ethernet port", ethRole ? ethRole.label : humanize(eth.role || "unknown")),
         fact("Rescue hotspot", !n.wifi_available ? html`<span class="faint">Not available</span>` : !hs.enabled ? "Off" : hsOn ? "On" : hs.state === "retry" ? "Retrying uplink" : "Standby")];
@@ -3055,7 +3055,7 @@ const Network = {
       : "Wi-Fi connects the box, the Ethernet port becomes the retro-LAN port.";
     const after = hs.after_s && hs.after_s !== 300 ? "5 min (60 s while Wi-Fi is not set up)" : "5 min";
     return html`<section class="card" aria-labelledby="h-uplink" data-key="net-uplink">
-      <div class="card-head">${icon("globe")}<h3 id="h-uplink">Uplink</h3><span class="sub">How this box reaches your network and the internet</span>
+      <div class="card-head">${icon("globe")}<h3 id="h-uplink">Internet connection</h3><span class="sub">How this box reaches your network and the internet</span>
         <span class="spacer"></span>${saving ? html`<span class="chip chip-warn">${spinner()} Applying…</span>` : ""}</div>
       <div class="net-pad">
         <div class="mode-pick" role="radiogroup" aria-labelledby="h-uplink">
@@ -3866,13 +3866,14 @@ const Settings = {
     const hasLan = cfg.schema.some((s) => s.group === "lan");
     const hasNet = cfg.schema.some((s) => s.group === "network");
     patch(view, html`<div class="stack">
+      <label class="search find-setting">${icon("search")}<input class="input" type="search" data-input="settings-find" placeholder="Find a setting, e.g. CONNECT, box name, log" autocomplete="off" aria-label="Find a setting"></label>
       <a class="card lan-link" href="#/modem">${icon("modem")}<span><b>Default modem mode and per-line modes are on the Modem page</b><small>Currently ${MODE_NAME[mode] || mode} Modem Mode${overrides.length ? ` · ${overrides.length} line${overrides.length === 1 ? "" : "s"} switched individually` : ""}. The options below fine-tune each mode.</small></span>${icon("chevron", "chev")}</a>
       <a class="card lan-link" href="#/parties">${icon("users")}<span><b>Your public nickname and the public parties are on the Parties page</b><small>Choose a nickname there to join, chat and host public parties. Private parties never need one.</small></span>${icon("chevron", "chev")}</a>
       ${GROUPS.map(groupHtml)}
       ${other.length ? html`<section class="card"><div class="card-head"><h3>Other</h3></div><div class="fields">${other.map((s) => this.field(s))}</div></section>` : ""}
       <a class="card lan-link" href="#/smb">${icon("folder")}<span><b>File sharing settings are on the Fileshare pages</b><small>Windows file sharing (workgroup), Mac file sharing, FTP and the web server each have their own page under Fileshare.</small></span>${icon("chevron", "chev")}</a>
       ${hasLan ? html`<a class="card lan-link" href="#/lan">${icon("ethernet")}<span><b>LAN port settings are on the LAN page</b><small>Retro-LAN port on/off, internet sharing and the LAN party (incl. auto-approve) apply immediately there.</small></span>${icon("chevron", "chev")}</a>` : ""}
-      ${hasNet ? html`<a class="card lan-link" href="#/network">${icon("wifi")}<span><b>Uplink, Wi-Fi and rescue hotspot are on the Uplink page</b><small>Choose Ethernet or Wi-Fi, join a Wi-Fi network and manage the rescue hotspot there.</small></span>${icon("chevron", "chev")}</a>` : ""}
+      ${hasNet ? html`<a class="card lan-link" href="#/network">${icon("wifi")}<span><b>Internet connection, Wi-Fi and rescue hotspot are on the Internet page</b><small>Choose Ethernet or Wi-Fi, join a Wi-Fi network and manage the rescue hotspot there.</small></span>${icon("chevron", "chev")}</a>` : ""}
       <section class="card" aria-labelledby="h-net">
         <div class="card-head">${icon("network")}<h3 id="h-net">Dial-in network</h3><span class="sub">PPP addresses for dial-in PCs · read-only, set in config.toml</span></div>
         <div class="readonly-grid">
@@ -3938,6 +3939,12 @@ const Settings = {
   onSave() { this.save(); },
   actions: {
     "settings-retry"() { this.loadError = null; this.render(); this.load(); },
+    "settings-find"(input) {
+      // filters the rows already on the page; matching groups open so the hit is visible
+      const q = input.value.trim().toLowerCase();
+      document.querySelectorAll("#view .setting").forEach((r) => { r.hidden = !!q && !r.textContent.toLowerCase().includes(q); });
+      document.querySelectorAll("#view details.group").forEach((g) => { g.hidden = !!q && !g.querySelector(".setting:not([hidden])"); if (q && !g.hidden) g.open = true; });
+    },
     "settings-save"() { this.save(); },
     "settings-discard"() { this.draft = { ...this.cfg.values }; this.errors = {}; this.render(); toast("Changes discarded", { type: "info", timeout: 2000 }); },
     "setting-seg"(b) {
@@ -4013,7 +4020,7 @@ function ipClashBanner(lan) {
 // ---- file sharing: one folder for the retro LAN, over Windows and Mac sharing, FTP and the web (fileshare.py)
 const shareState = () => (S.status && S.status.lan && S.status.lan.fileshare) || null;
 const SHARE_SVC = {
-  smb: { route: "smb", title: "Windows file sharing", short: "LAN share", ic: "network", key: "share.smb" },
+  smb: { route: "smb", title: "Windows file sharing", short: "Windows", ic: "network", key: "share.smb" },
   afp: { route: "mac", title: "Mac file sharing", short: "Mac share", ic: "mac", key: "share.afp" },
   ftp: { route: "ftp", title: "FTP server", short: "FTP", ic: "swap", key: "share.ftp" },
   web: { route: "web", title: "Web server", short: "Web", ic: "globe", key: "share.web" },
