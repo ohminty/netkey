@@ -251,6 +251,11 @@ class App:
         with self.lock:
             self.sessions.pop(token or "", None)
 
+    def logout_others(self, keep):
+        """After a password change: every other browser signed in with the old password has to sign in again."""
+        with self.lock:
+            self.sessions = {t: exp for t, exp in self.sessions.items() if t == keep}
+
     # live state
     def device_present(self, key):
         return os.path.exists(os.path.join("/dev", key))
@@ -670,6 +675,69 @@ class App:
         if result is None:
             return None
         return {"result": result, "network": self.net_get()}
+
+    # phone numbers and modem calls (calls.py): the LAN service holds the number and the calls; the GUI keeps the
+    # phone book (phone-book.json, read by the LAN service for "phone book only") and asks the hub for presence
+    PHONE_CMDS = {"get_number": ("phone_get", 25), "release": ("phone_release", 25), "hangup": ("phone_hangup", 8),
+                  "refresh": ("phone_refresh", 25)}
+
+    def phone_book(self):
+        from . import calls as cl
+        rows = read_json(os.path.join(self.state_dir, cl.BOOK_FILE), []) or []
+        return [r for r in rows if isinstance(r, dict) and r.get("number")][:200]
+
+    def set_phone_book(self, rows):
+        from . import calls as cl
+        if not isinstance(rows, list) or len(rows) > 200:
+            raise ValueError("the phone book holds up to 200 entries")
+        out, seen = [], set()
+        for r in rows:
+            if not isinstance(r, dict):
+                raise ValueError("bad phone book entry")
+            n = cl.digits(r.get("number"))[-7:]
+            if cl.classify(n) != ("number", n):
+                raise ValueError(f"{r.get('number')!r} is not a NetKey number (555-1000 to 555-9999)")
+            if n in seen:
+                raise ValueError(f"{cl.fmt_number(n)} is in the phone book twice")
+            seen.add(n)
+            name = " ".join(str(r.get("name") or "").split())[:32]
+            out.append({"name": name, "number": n})
+        write_json_atomic(os.path.join(self.state_dir, cl.BOOK_FILE), out, mode=0o644)
+        return out
+
+    def phone_get(self):
+        from . import lan
+        st = lan.read_status() or {}
+        cfg = self.cfg()
+        return {"phone": st.get("phone"), "lan_running": bool(st), "book": self.phone_book(),
+                "settings": dict(cfg.get("phone") or {}), "hub": bool(cfg["lan"].get("hub_fingerprint"))}
+
+    def phone_command(self, data):
+        from . import lan, party as pt
+        what = str(data.get("cmd") or "")
+        if what not in self.PHONE_CMDS:
+            raise ValueError("unknown phone command")
+        cmd, timeout = self.PHONE_CMDS[what]
+        kw = {"line": int(data.get("line", -1))} if what == "hangup" else {}
+        cid = pt.queue_command(self.state_dir, cmd, **kw)
+        result = pt.wait_result(lan.RUN_DIR, cid, timeout=timeout)
+        if result is None:
+            return None
+        return {"result": result, **self.phone_get()}
+
+    def phone_presence(self):
+        """available / busy / unreachable for the phone book's numbers (only what the hub lets this box see)."""
+        nums = [r["number"] for r in self.phone_book()]
+        if not nums:
+            return {"numbers": {}}
+        return self.hub_call("POST", "/v1/numbers/presence", {"numbers": nums})
+
+    def phone_lookup(self, n):
+        from . import calls as cl
+        n = cl.digits(n)[-7:]
+        if cl.classify(n) != ("number", n):
+            raise ValueError("not a NetKey number (555-1000 to 555-9999)")
+        return self.hub_call("GET", f"/v1/numbers/lookup?n={n}")
 
     def calls(self, limit):
         """Call log; ongoing calls get their live byte counters from the line status."""
@@ -1165,6 +1233,8 @@ def make_handler(app, secure):
                                      dict(out, error=None if out["result"]["ok"] else out["result"]["message"]))
             if res == "parties":
                 return self.api_parties(method, parts[1:], query)
+            if res == "phone":
+                return self.api_phone(method, arg, query)
             if res == "update" and arg == "check" and method == "POST":
                 return self.json(200, app.check_update())
             if res == "update" and arg == "install" and method == "POST":
@@ -1191,10 +1261,31 @@ def make_handler(app, secure):
                     raise ValueError("nothing to change")
                 if new:
                     app.store.set_admin_password(new)        # validates first, so nothing half-applied
+                    app.logout_others(self.token())
                 if user is not None:
                     app.store.set_admin_user(user)
                 return self.json(200, {"ok": True, "username": app.store.admin_user(),
                                        "default_credentials": app.store.admin_is_default()})
+            return self.error(404, "not found")
+
+        def api_phone(self, method, arg, query):
+            if arg is None and method == "GET":
+                return self.json(200, app.phone_get())
+            if arg is None and method == "POST":
+                out = app.phone_command(self.body())
+                if out is None:
+                    return self.error(504, "The LAN service did not answer. Is netkey-lan running?")
+                return self.json(200 if out["result"]["ok"] else 400,
+                                 dict(out, error=None if out["result"]["ok"] else out["result"]["message"]))
+            if arg == "book" and method == "PUT":
+                return self.json(200, {"book": app.set_phone_book(self.body().get("book"))})
+            try:
+                if arg == "presence" and method == "GET":
+                    return self.json(200, app.phone_presence())
+                if arg == "lookup" and method == "GET":
+                    return self.json(200, app.phone_lookup((query.get("n") or [""])[0]))
+            except PartiesError as e:
+                return self.error(e.status, str(e))
             return self.error(404, "not found")
 
         def api_parties(self, method, sub, query=None):
@@ -1308,7 +1399,7 @@ def make_handler(app, secure):
                     dst = os.path.join(os.path.dirname(src), fs.check_name(d.get("to")))
                     if os.path.lexists(dst) and os.path.normcase(dst) != os.path.normcase(src):
                         return self.error(409, "Something with that name is already there.")
-                    os.rename(src, dst)
+                    fs.move(src, dst)
                     return self.json(200, {"ok": True})
                 if method == "POST" and arg == "move":
                     d = self.body()
@@ -1324,7 +1415,7 @@ def make_handler(app, secure):
                             raise ValueError("a folder can't be moved into itself")
                         if os.path.lexists(dst):
                             return self.error(409, f"{os.path.basename(src)} is already in that folder.")
-                        os.rename(src, dst)
+                        fs.move(src, dst)
                         moved += 1
                     return self.json(200, {"ok": True, "moved": moved})
                 if method == "POST" and arg == "delete":
@@ -1337,6 +1428,7 @@ def make_handler(app, secure):
                             shutil.rmtree(path)
                         else:
                             os.unlink(path)
+                        fs.remove_fork(path)
                         n += 1
                     log.info("web: deleted %d item(s) from the shared folder", n)
                     return self.json(200, {"ok": True, "deleted": n})
@@ -1396,6 +1488,7 @@ def make_handler(app, secure):
                 folder = fs.resolve(root, q("path"))
                 for p in parts[:-1]:
                     folder = os.path.join(folder, p)
+                    fs.resolve(root, os.path.relpath(folder, root), must_exist=False)   # each step stays inside
                     if not os.path.isdir(folder):
                         os.mkdir(folder)
                         os.chmod(folder, 0o2775)
@@ -1415,6 +1508,7 @@ def make_handler(app, secure):
                 os.chmod(tmp, 0o664)
                 os.replace(tmp, dst)
                 tmp = None
+                fs.remove_fork(dst)          # a replaced Mac file's old resource fork doesn't belong to the new one
                 log.info("web: uploaded %s (%d bytes) to the shared folder", "/".join(parts), n)
                 return self.json(200, {"ok": True, "name": parts[-1], "size": n})
             except ValueError as e:

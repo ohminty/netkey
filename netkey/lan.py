@@ -27,6 +27,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+from . import calls as cl
 from . import fileshare as fs
 from . import hubclient as hc
 from . import identity as ident
@@ -335,6 +336,7 @@ class LanDaemon:
         self.prober = None           # RelayProbe thread while one runs
         self.host_rt = {}            # member: link to the host
         self.uplink = Uplink(self)   # Wi-Fi uplink, automatic built-in Ethernet port, rescue hotspot
+        self.calls = cl.CallService(self, run_dir, state_dir)   # modem calls: extensions and phone numbers
 
     def stop(self, *_):
         self.stopping = True
@@ -774,7 +776,7 @@ class LanDaemon:
         s = self.cfg["share"]
         self.share_status = {"active": False, "paused": reason, "name": fs.netbios_name(), "share": fs.SHARE_NAME,
                              "workgroup": s["workgroup"], "dir": s["dir"],
-                             **{k: {"enabled": bool(s[k]), "running": False, "error": None} for k in ("smb", "ftp", "web")}}
+                             **{k: {"enabled": bool(s[k]), "running": False, "error": None} for k in fs.SERVICES}}
 
     def stop_fileshare(self):
         for name, p in list(self.share_procs.items()):
@@ -839,6 +841,11 @@ class LanDaemon:
                     want.append("dcerpcd")
             else:
                 errors["smb"] = "Samba is not installed (sudo apt install samba)"
+        if s["afp"]:
+            if os.path.exists(fs.NETATALK):
+                want.append("afp")
+            else:
+                errors["afp"] = "netatalk is not installed (run the NetKey installer again, or sudo apt install netatalk)"
         ftp, web = bool(s["ftp"]), bool(s["web"])
         if ftp:
             import importlib.util
@@ -847,7 +854,8 @@ class LanDaemon:
         if ftp or web:
             want.append("files")
         conf = fs.smb_conf(self.cfg, self.run_dir, BRIDGE, a["gateway"])
-        sig = (conf, ftp, web, a["gateway"], s["dir"])
+        afp_conf = fs.afp_conf(self.cfg, self.state_dir, a["gateway"])
+        sig = (conf, afp_conf, ftp, web, a["gateway"], s["dir"])
         if sig != self.share_sig:
             self.stop_fileshare()
             self.share_sig, self.share_fails, self.share_errors = sig, {}, {}
@@ -860,6 +868,14 @@ class LanDaemon:
             with open(os.path.join(smb_dir, "smb.conf.tmp"), "w") as f:
                 f.write(conf)
             os.replace(os.path.join(smb_dir, "smb.conf.tmp"), os.path.join(smb_dir, "smb.conf"))
+            afp_dir = os.path.join(self.run_dir, fs.AFP_DIR)
+            os.makedirs(afp_dir, exist_ok=True)
+            os.chmod(afp_dir, 0o755)          # afpd reads its config again as the guest user after a Mac logs in
+            os.makedirs(os.path.join(self.state_dir, fs.AFP_DIR), mode=0o700, exist_ok=True)   # file IDs (CNID)
+            with open(os.path.join(afp_dir, "afp.conf.tmp"), "w") as f:
+                os.fchmod(f.fileno(), 0o644)
+                f.write(afp_conf)
+            os.replace(os.path.join(afp_dir, "afp.conf.tmp"), os.path.join(afp_dir, "afp.conf"))
         for name in [n for n in self.share_procs if n not in want]:
             p = self.share_procs.pop(name)
             if p.poll() is None:
@@ -884,19 +900,24 @@ class LanDaemon:
             recent = self.share_fails[name] = [t for t in self.share_fails.get(name, []) if now - t < 120]
             if len(recent) >= 3:
                 continue                          # back off: three exits in two minutes
-            self.share_procs[name] = subprocess.Popen(self.share_cmd(name, ftp, web), cwd="/", env=self.share_env())
+            # netatalk logs to syslog (journalctl -t afpd); its own output is only noise from an indexer it pokes
+            quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if name == "afp" else {}
+            self.share_procs[name] = subprocess.Popen(self.share_cmd(name, ftp, web), cwd="/", env=self.share_env(),
+                                                      **quiet)
             log.info("lan: file sharing: %s started (pid %d)", name, self.share_procs[name].pid)
-        run = {n: bool(self.share_procs.get(n) and self.share_procs[n].poll() is None) for n in ("smbd", "nmbd", "files")}
+        run = {n: bool(self.share_procs.get(n) and self.share_procs[n].poll() is None)
+               for n in ("smbd", "nmbd", "afp", "files")}
 
         def svc(key, running, enabled):
             err = errors.get(key) or (None if running else next(
-                (self.share_errors[n] for n in (("smbd", "nmbd", "dcerpcd") if key == "smb" else ("files",))
+                (self.share_errors[n] for n in {"smb": ("smbd", "nmbd", "dcerpcd"), "afp": ("afp",)}.get(key, ("files",))
                  if n in self.share_errors), None))
             return {"enabled": enabled, "running": bool(running and enabled), "error": err if enabled else None}
         self.share_status = {"active": True, "paused": None, "address": a["gateway"], "name": fs.netbios_name(),
                              "share": fs.SHARE_NAME, "workgroup": s["workgroup"], "dir": s["dir"],
                              "writable": bool(s["writable"]),
                              "smb": svc("smb", run["smbd"] and run["nmbd"], bool(s["smb"])),
+                             "afp": svc("afp", run["afp"], bool(s["afp"])),
                              "ftp": svc("ftp", run["files"] and ftp, bool(s["ftp"])),
                              "web": svc("web", run["files"] and web, bool(s["web"]))}
 
@@ -909,6 +930,8 @@ class LanDaemon:
         conf = os.path.join(self.run_dir, fs.SMB_DIR, "smb.conf")
         if name in ("smbd", "nmbd"):
             return ns_exec + [name, "--foreground", "--no-process-group", "--debug-stdout", f"--configfile={conf}"]
+        if name == "afp":
+            return ns_exec + [fs.NETATALK, "-d", "-F", os.path.join(self.run_dir, fs.AFP_DIR, "afp.conf")]
         if name == "dcerpcd":
             return ns_exec + [os.path.join(fs.SAMBA_LIBEXEC, "samba-dcerpcd"), "--foreground", "--no-process-group",
                               "--debug-stdout", f"--configfile={conf}"] + \
@@ -1386,14 +1409,17 @@ class LanDaemon:
             self.party.save()
 
     def ensure_agent(self):
-        """The long-poll event channel runs while this box is in a party through the hub, and while a planned
-        event it wants to join automatically is about to start (to hear "listing_started")."""
+        """The long-poll event channel runs while this box is in a party through the hub, while a planned event it
+        wants to join automatically is about to start (to hear "listing_started"), and while it takes calls."""
         d = self.party.data
         want = d.get("via") == "hub" and d.get("role") in ("host", "member")
         if not want and d.get("role", "standalone") == "standalone" and self.cfg["lan"]["hub_fingerprint"]:
             want = self.watching_now()
+        if not want and self.cfg["lan"]["hub_fingerprint"]:
+            want = self.calls.wants_events()       # taking calls, or a call between boxes is up
         if want and (self.agent is None or not self.agent.is_alive()):
             self.agent = hc.HubAgent(self.hub_client(), int(d.get("hub_seq", 0)))
+            self.agent.callback = self.calls.hub_event      # call events are handled at once, not every 2 s
             self.agent.start()
         elif not want and self.agent:
             self.agent.stop()
@@ -1513,6 +1539,8 @@ class LanDaemon:
             log.info("lan: party %s: %s", c["cmd"], msg)
 
     def command(self, c):
+        if str(c.get("cmd", "")).startswith("phone_"):
+            return self.calls.command(c["cmd"], **{k: v for k, v in c.items() if k not in ("cmd", "id")})
         if str(c.get("cmd", "")).startswith("wifi_"):
             try:
                 return self.uplink.command(c)
@@ -1715,7 +1743,10 @@ class LanDaemon:
         """Protocol counters (protostats.py): loaded once per namespace, never reloaded, so counts survive."""
         if self.stats_since is not None:
             return
-        if self.nsrun("nft", "list", "table", "bridge", ps.TABLE, check=False).returncode != 0:
+        if self.nsrun("nft", "list", "counter", "bridge", ps.TABLE, f"{ps.DIRS[0]}_{ps.NEWEST}",
+                      check=False).returncode != 0:
+            # no table yet, or one from a version that counted fewer protocols: (re)create it
+            self.nsrun("nft", "delete", "table", "bridge", ps.TABLE, check=False)
             self.nsrun("nft", "-f", "-", input_text=ps.ruleset())
         self.stats_since = time.time()
 
@@ -1953,6 +1984,7 @@ class LanDaemon:
             "fileshare": self.share_status if state in ("up", "error") else dict(
                 self.share_status, active=False, paused=detail or "The retro-LAN port is not active"),
             "proto": self.proto_counters() if state == "up" else None, "proto_since": self.stats_since,
+            "phone": self.calls.status(),
             "updated": time.time(), "pid": os.getpid(),
         }
         os.makedirs(self.run_dir, exist_ok=True)
@@ -1991,6 +2023,11 @@ class LanDaemon:
             self.ensure_agent()
             if self.party.data.get("via") == "hub" and self.party.role in ("host", "member"):
                 self.start_probe()                 # every 10 min: keeps the hub's relay choice current
+            if self.cfg["lan"]["hub_fingerprint"]:
+                self.calls.refresh_number()
+                self.calls.sync_hub()
+                if self.calls.number():
+                    self.start_probe()             # both boxes' relay times pick a call's relay
         except (ValueError, OSError) as e:
             log.warning("lan: hub: %s", e)
         self.process_hub_events()
@@ -2074,6 +2111,10 @@ class LanDaemon:
     def loop(self):
         log.info("lan: starting (namespace %s, subnet %s, party role %s)", self.ns(), self.cfg["lan"]["subnet"],
                  self.party.role)
+        try:
+            self.calls.start()
+        except OSError as e:
+            log.error("lan: modem calls unavailable: %s", e)
         while not self.stopping:
             try:
                 self.step()
@@ -2084,6 +2125,7 @@ class LanDaemon:
                 time.sleep(0.2)
         if self.agent:
             self.agent.stop()
+        self.calls.stop()
         self.teardown()
         self.write_status("stopped", "LAN service stopped")
         log.info("lan: stopped")

@@ -76,10 +76,17 @@ DEFAULTS = {
         # file sharing to the retro LAN (never the home network): one folder, three ways in
         "dir": "/srv/netkey",
         "smb": True,               # Windows file sharing (Network Neighborhood), guest access, SMB1 for Win 3.11-XP
+        "afp": True,               # Mac file sharing (AFP over TCP/IP), guest access, Mac OS 7.6-9 and OS X
         "ftp": True,               # FTP; logins are the modem users
         "web": True,               # plain HTTP directory listing for old browsers (read only)
         "workgroup": "WORKGROUP",
-        "writable": True,          # PCs may add, change and delete files over the Windows share
+        "writable": True,          # PCs may add, change and delete files over Windows and Mac file sharing
+    },
+    "phone": {
+        # modem calls between boxes (calls.py): the number itself lives at the hub and in phone.json
+        "incoming": "off",         # off | book (people in my phone book) | anyone (anyone with my number)
+        "busy_in_party": True,     # callers hear BUSY while this box is in a LAN party
+        "dnd": False,              # do not disturb
     },
     "network": {
         "uplink": "ethernet",      # ethernet: built-in port is the uplink | wifi: Wi-Fi is, the built-in port decides
@@ -106,6 +113,7 @@ CHOICES = {
     ("serial", "dcd_mode"): {"follow", "always_on"},
     ("lines", "default_mode"): set(("virtual", "physical")),
     ("network", "uplink"): {"ethernet", "wifi"},
+    ("phone", "incoming"): {"off", "book", "anyone"},
 }
 MODES = ("virtual", "physical")
 WORKGROUP_RE = re.compile(r"^[A-Za-z0-9_-]{1,15}$")
@@ -160,12 +168,21 @@ SETTINGS = [
      "When hosting a LAN party, every box with the invite code joins without asking.", None, {}),
     ("share.smb", "bool", "Windows file sharing",
      "The shared folder shows up in Network Neighborhood on the retro LAN (no password).", None, {}),
+    ("share.afp", "bool", "Mac file sharing",
+     "The shared folder for Macs with Ethernet (Mac OS 7.6 to 9 and Mac OS X), over TCP/IP. No password.", None, {}),
     ("share.ftp", "bool", "FTP server", "Log in with a modem user's name and password.", None, {}),
     ("share.web", "bool", "Web server", "A plain page old browsers can download the files from.", None, {}),
     ("share.workgroup", "string", "Workgroup",
      "The Windows workgroup the box appears in. Up to 15 letters, digits, - and _.", None, {"maxlength": 15}),
     ("share.writable", "bool", "PCs can change files",
-     "Retro PCs may add, change and delete files over Windows file sharing. Off: they can only read.", None, {}),
+     "Retro PCs and Macs may add, change and delete files over Windows and Mac file sharing. Off: they can "
+     "only read.", None, {}),
+    ("phone.incoming", "choice", "Allow incoming calls",
+     "Who may call this box's number: nobody (off), people in the phone book, or anyone with the number.", "phone",
+     {"choices": ["off", "book", "anyone"]}),
+    ("phone.busy_in_party", "bool", "Busy while in a LAN party", "Callers hear BUSY while this box is in a party.",
+     "phone", {}),
+    ("phone.dnd", "bool", "Do not disturb", "Callers hear BUSY. The rest of the settings stay as they are.", "phone", {}),
     ("network.uplink", "choice", "Uplink",
      "Ethernet: the built-in port connects the box to your network. Wi-Fi: Wi-Fi does, and the built-in port "
      "becomes the retro-LAN port when cabled to retro PCs (or a management port when cabled into your network).",

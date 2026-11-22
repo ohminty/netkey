@@ -99,17 +99,17 @@ class Registry:
     def _update(self, change):
         """change(lines, absent) -> result; runs under the lock on fresh data and saves if anything changed."""
         import fcntl
-        with open(self.path + ".lock", "a") as lock:
+        fd = os.open(self.path + ".lock", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o640)
+        with os.fdopen(fd, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             lines, absent = self._read()
             before = (dict(lines), dict(absent))
             result = change(lines, absent)
             if (lines, absent) != before:
-                tmp = self.path + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"lines": lines, "absent_since": {k: round(v) for k, v in absent.items()}}, f,
-                              indent=2, sort_keys=True)
-                os.replace(tmp, self.path)
+                from .store import write_atomic
+                write_atomic(self.path, json.dumps({"lines": lines, "absent_since": {k: round(v) for k, v in
+                                                                                     absent.items()}},
+                                                   indent=2, sort_keys=True), mode=0o644)
             self.lines, self.absent = lines, absent
             self.mtime = self._stamp()
         return result

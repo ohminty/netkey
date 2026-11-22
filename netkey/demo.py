@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 
+from . import fileshare as fs
 from . import status as st
 from .store import Store, write_json_atomic
 from .web import LIVE_POINTS, SAMPLE_S, App
@@ -428,7 +429,7 @@ def demo_fileshare(cfg):
     s = cfg["share"]
     return {"active": True, "paused": None, "address": "10.99.0.1", "name": "NETKEY", "share": "FILES",
             "workgroup": s["workgroup"], "dir": s["dir"], "writable": s["writable"],
-            **{k: {"enabled": bool(s[k]), "running": bool(s[k]), "error": None} for k in ("smb", "ftp", "web")}}
+            **{k: {"enabled": bool(s[k]), "running": bool(s[k]), "error": None} for k in fs.SERVICES}}
 
 
 class DemoApp(App):
@@ -486,6 +487,42 @@ class DemoApp(App):
 
     def net_get(self):
         return self.demo_net.view()
+
+    # phone numbers: simulated (the number lives in the demo's state, presence is made up)
+    def demo_phone_status(self):
+        num = getattr(self, "demo_number", None)
+        s = dict(self.cfg().get("phone") or {})
+        avail = bool(num) and s.get("incoming", "off") != "off" and not s.get("dnd")
+        return {"number": num, "settings": s, "available": avail, "hub_ok": True, "lines": [0, 1, 2], "ready": [1, 2],
+                "calls": []}
+
+    def phone_get(self):
+        return {"phone": self.demo_phone_status(), "lan_running": True, "book": self.phone_book(),
+                "settings": dict(self.cfg().get("phone") or {}), "hub": True}
+
+    def phone_command(self, data):
+        time.sleep(0.5)
+        cmd = str(data.get("cmd") or "")
+        if cmd == "get_number":
+            self.demo_number = "5553870"
+            msg = "Your number is 555-3870"
+        elif cmd == "release":
+            self.demo_number = None
+            msg = "Number given up"
+        elif cmd == "hangup":
+            msg = "Hung up"
+        else:
+            raise ValueError("unknown phone command")
+        return {"result": {"ok": True, "message": msg}, **self.phone_get()}
+
+    def phone_presence(self):
+        states = ["available", "busy", "unreachable"]
+        return {"numbers": {r["number"]: states[int(r["number"]) % 3] for r in self.phone_book()}}
+
+    def phone_lookup(self, n):
+        from . import calls as cl
+        n = cl.digits(n)[-7:]
+        return {"number": n, "name": {"5554321": "Mike", "5552600": "AmigaAnna"}.get(n, "")}
 
     def net_command(self, data):
         cmd, kw = self.net_args(data)
@@ -561,6 +598,7 @@ class DemoApp(App):
                             "expires": t + 21000}],
                 "rx_bytes": 5_400_000 + t % 100000 * 37, "tx_bytes": 1_200_000 + t % 100000 * 9,
                 "fileshare": demo_fileshare(self.cfg()),
+                "phone": self.demo_phone_status(),
                 "static_pcs": [] if p["role"] == "member" else [{"ip": "10.99.0.216", "mac": "00:a0:24:dd:7c:5f", "name": "TCI486",
                                                                   "seen": t - 40, "in_range": True}],
                 "updated": now}
@@ -676,8 +714,10 @@ class DemoSim(threading.Thread):
 
 
 # simulated retro-LAN traffic per 5 s sample: (dir, proto) -> (packets, bytes per packet); a Doom game over IPX,
-# a Win95 file share over NetBEUI, some TCP/IP, and one PC still on IPX 802.2 (the frame type mismatch warning)
+# a Win95 file share over NetBEUI, a Mac on AppleTalk, some TCP/IP, and one PC still on IPX 802.2 (the frame type
+# mismatch warning)
 DEMO_PROTO = {("lan", "ipx_8023"): (170, 96), ("party", "ipx_8023"): (160, 96), ("lan", "netbeui"): (14, 610),
+              ("lan", "appletalk"): (8, 180), ("party", "appletalk"): (4, 180),
               ("lan", "nbt"): (3, 240), ("lan", "tcp"): (42, 820), ("party", "tcp"): (9, 300), ("lan", "udp"): (6, 120),
               ("lan", "icmp"): (1, 98), ("lan", "arp"): (1, 60), ("party", "arp"): (1, 60), ("lan", "ipx_8022"): (2, 110),
               ("party", "ipx_ii"): (0, 0)}

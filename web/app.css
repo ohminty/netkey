@@ -223,6 +223,7 @@ code, .mono { font-family: var(--mono); font-size: .92em; }
   font: 700 10.5px/1 var(--mono); letter-spacing: .04em; border: 1px solid var(--border-2); color: var(--text-2); background: var(--surface-2);
 }
 .badge-vmm { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
+.badge-call { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 35%, transparent); background: color-mix(in srgb, var(--violet) 12%, transparent); }
 .badge-pmm { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); background: var(--amber-soft); }
 .chip {
   display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border-radius: var(--radius-sm);
@@ -1359,7 +1360,8 @@ a.kpi-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px
 .upd-notes { margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); white-space: pre-wrap; font: 12.5px/1.5 var(--mono, ui-monospace, monospace); max-height: 240px; overflow: auto; }
 
 /* fileshare */
-.share-svcs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.share-svcs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1180px) { .share-svcs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .share-svc { display: flex; align-items: center; gap: 12px; padding: 14px 16px; color: var(--text-2); min-width: 0; }
 .share-svc:hover { text-decoration: none; border-color: var(--border-2); background: var(--surface-2); }
 .share-svc .ss-t { flex: 1; display: grid; min-width: 0; }
@@ -1420,3 +1422,21 @@ a.file-name:hover, button.file-name:hover b { text-decoration: underline; }
 .upd-prog .banner { margin: 6px 0 10px; }
 .upd-log { max-height: 220px; font-size: 11.5px; }
 .check-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 10px 0; font-size: 13px; }
+
+/* phone numbers and modem calls (Modem page) */
+.phone-grid { align-items: start; }
+.phone-card { display: grid; gap: 12px; }
+.phone-card h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; }
+.phone-card p { margin: 0; }
+.phone-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.phone-num { display: flex; align-items: center; gap: 6px; margin: 6px 0 4px; }
+.phone-num .mono { font-size: 28px; font-weight: 700; letter-spacing: .02em; color: var(--text); }
+.phone-settings { display: grid; gap: 2px; border-top: 1px solid var(--border); padding-top: 8px; }
+.phone-sw { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; cursor: pointer; }
+.phone-sw span:first-child { display: grid; gap: 2px; min-width: 0; }
+.phone-sw small { color: var(--text-3); font-size: 12.5px; }
+.phone-who { padding: 0 0 6px; }
+.presence { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.dot-green { background: var(--accent); } .dot-amber { background: var(--amber); } .dot-gray { background: var(--text-3); }
+.book-form { display: grid; grid-template-columns: minmax(0, 1fr) 130px auto auto; gap: 8px; align-items: center; }
+@media (max-width: 640px) { .book-form { grid-template-columns: 1fr 1fr; } }

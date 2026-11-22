@@ -58,12 +58,26 @@ def verify_password(password, stored):
         return False
 
 
+def write_atomic(path, text, mode=0o640):
+    """Write a file in one step. The temporary file gets a fresh random name (O_EXCL), so a symlink someone planted
+    in the folder is never followed: root services write into /var/lib/netkey, which the web service owns."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix="." + os.path.basename(path) + ".")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_json_atomic(path, data, mode=0o640):
-    tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=1, sort_keys=True)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    write_atomic(path, json.dumps(data, indent=1, sort_keys=True), mode)
 
 
 def read_json(path, default=None):
@@ -184,9 +198,7 @@ class Store:
 
     def touch_settings(self):
         self.export_settings()
-        path = os.path.join(self.state_dir, SETTINGS_STAMP)
-        with open(path, "w") as f:
-            f.write(f"{time.time()} {secrets.token_hex(4)}\n")
+        write_atomic(os.path.join(self.state_dir, SETTINGS_STAMP), f"{time.time()} {secrets.token_hex(4)}\n")
 
     def export_settings(self):
         write_json_atomic(os.path.join(self.state_dir, SETTINGS_EXPORT),

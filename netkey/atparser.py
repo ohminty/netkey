@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 RESULT_CODES = {"OK": 0, "CONNECT": 1, "RING": 2, "NO CARRIER": 3, "ERROR": 4,
                 "NO DIALTONE": 6, "BUSY": 7, "NO ANSWER": 8}
-DEFAULT_SREGS = {0: 0, 2: 43, 3: 13, 4: 10, 5: 8, 7: 50, 8: 2, 10: 14, 12: 50}
+DEFAULT_SREGS = {0: 0, 1: 0, 2: 43, 3: 13, 4: 10, 5: 8, 7: 50, 8: 2, 10: 14, 12: 50}
 MAX_LINE = 255
 
 # Frozen: Windows derives the modem's detection ID (UNIMODEMxxxxxxxx) from these exact replies.
@@ -22,6 +22,21 @@ ATI_TEXT = {
 @dataclass
 class Dial:
     number: str
+
+
+@dataclass
+class Answer:
+    """ATA: answer a ringing call (the session sends NO CARRIER when nothing rings)."""
+
+
+@dataclass
+class Online:
+    """ATO: back to the held call."""
+
+
+@dataclass
+class Hangup:
+    """ATH while a call is held in online command mode."""
 
 
 @dataclass
@@ -44,6 +59,10 @@ class _Abort(Exception):
     """Stop processing the command line and send this result."""
 
 
+class _Act(Exception):
+    """Stop processing the command line and hand this action to the session."""
+
+
 class ATParser:
     def __init__(self, model="USRobotics 56K FAX EXT", connect_string="CONNECT 56000"):
         self.model = model
@@ -56,6 +75,7 @@ class ATParser:
         self.last_number = ""
         self.out = bytearray()
         self.commands = []  # sanitized command lines executed by the last feed(), for logging
+        self.call_held = False  # a call is up and the line is in online command mode (+++): ATO and ATH act on it
 
     # public API
     def feed(self, data):
@@ -119,6 +139,8 @@ class ATParser:
         except _Abort as e:
             self._result(e.args[0])
             return None
+        except _Act as e:
+            return e.args[0]
 
     @staticmethod
     def _number(u, i):
@@ -175,8 +197,14 @@ class ATParser:
             if num not in ATI_TEXT:
                 raise _Abort("ERROR")
             self._info(ATI_TEXT[num].format(model=self.model))
-        elif c in "AO":
+        elif c == "A":
+            raise _Act(Answer())
+        elif c == "O":
+            if self.call_held:
+                raise _Act(Online())
             raise _Abort("NO CARRIER")
+        elif c == "H" and self.call_held and not num:
+            raise _Act(Hangup())
         # H, L, M, W, B, N, P, T, ... are accepted as no-ops
 
     def _ampersand(self, code, num):

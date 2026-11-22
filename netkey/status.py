@@ -27,16 +27,11 @@ def ppp_file(run_dir, line):
 
 
 def write(path, data):
-    tmp = f"{path}.tmp{os.getpid()}"
+    from .store import write_atomic
     try:
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
+        write_atomic(path, json.dumps(data), mode=0o644)
     except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        pass
 
 
 def read(path):

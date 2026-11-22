@@ -33,6 +33,9 @@ itself, so whatever your 1997 PC sends arrives on your friend's PC exactly as if
 your houses. IPX, NetBEUI and TCP/IP all just work, and so does browsing each other's shared folders in Network
 Neighborhood.
 
+Classic Macs are welcome too. Their network language, **AppleTalk**, travels the same way, so Marathon, Bolo and
+other Mac network games find each other across the party, from one Mac with Ethernet to another.
+
 The connection between boxes is encrypted from end to end. Relays help your traffic across the internet and your
 party picks the one with the lowest delay automatically.
 
@@ -41,6 +44,9 @@ party picks the one with the lowest delay automatically.
 - **Private parties:** start one, share the invite code, approve who gets in. Up to 16 boxes.
 - **Public parties:** a list of parties anyone with a NetKey can browse and ask to join. Plan events ahead of time,
   RSVP, vote for games and chat with the other players. Be part of the community.
+- **A shared folder for every old machine:** Windows file sharing (Network Neighborhood, Windows for Workgroups
+  to XP), Mac file sharing for Mac OS 7.6 to 9 and Mac OS X (Mac programs keep their resource forks), FTP, and a plain
+  web page any old browser can read. Drop files in from your phone or computer.
 - **Your old PC stays separated** from your home network: it can't see your laptop or your files. You can let it
   online if you want to.
 - **Easy administration** to run everything from your phone or computer: who's connected, which games are on, how
@@ -49,7 +55,7 @@ party picks the one with the lowest delay automatically.
 ## What you need
 
 - A Raspberry Pi (any old works but a Pi 3, 4 or 5 is best), a microSD card and a USB network adapter
-- An old PC with a network card: DOS, Windows 95, 98 or XP
+- An old PC with a network card: DOS, Windows 95, 98 or XP. Or a Mac with Ethernet: Mac OS 7.6 to 9, or Mac OS X
 - A friend with the same setup. That's the whole point, after all.
 
 **Get started: [INSTALL.md](INSTALL.md).**
@@ -59,12 +65,21 @@ party picks the one with the lowest delay automatically.
 NetKey began as a dial-up modem emulator: an old PC with only a serial port can "dial up" through the Pi and get
 online, modem screech optional. That still works, and you'll find it under *Modem* in the web page.
 
+**Phone numbers.** Every box can get its own number, like `555-3870`. A machine on a serial line dials a friend's
+box with `ATDT5553870`, the friend's machine hears `RING` and answers, and both get `CONNECT`: a null-modem cable
+across the internet. That's online play for serial and modem games on the Amiga, the Atari ST and DOS. Incoming calls
+are off until you switch them on, you choose who may call (your phone book, or anyone with your number), and the
+box is busy while it's in a LAN party. Two lines on the same box call each other without a number: dial `555-0100`
+for line 0, `555-0101` for line 1. Calls run through the same relays as parties, encrypted from box to box.
+
 ## Under the hood
 
 Built on proven, standard technology, not clever hacks:
 
-- **A real Layer 2 network**, not a translator. Full-size Ethernet frames arrive untouched, which is why IPX and
-  NetBEUI games just work. Transported with VXLAN over VPN.
+- **A real Layer 2 network**, not a translator. Full-size Ethernet frames arrive untouched, which is why IPX,
+  NetBEUI and AppleTalk games just work. Transported with VXLAN over VPN.
+- **Standard file servers** on the retro LAN only: Samba (SMB1 for the old Windows versions), netatalk (AFP over
+  TCP/IP for Macs), FTP and HTTP. They never show up on your home network.
 - **End-to-end encrypted with VPN**, built into the Linux kernel. Our servers pass the
   traffic along but can't read it as its encrypted end to end.
 - **Works on any home connection**, including the awkward ones (CGNAT, DS-Lite, mobile networks), with no router
@@ -93,3 +108,8 @@ NetKey's cloud service (the hub and relay servers behind cloud parties) is not p
 whether a newer NetKey is out. That question carries the box's ID, its name, its NetKey version and its hardware (Raspberry Pi
 model, operating system, processor type, memory size, and which chip the retro LAN adapter has). The hub keeps them
 to count how many boxes are in use and on what. Nothing about your PCs, files or games is sent.
+
+**Phone numbers and calls:** a box with a number tells the hub who may call it (off, anyone, or the numbers in its
+phone book; never names) and whether it can take a call right now. For each call between boxes the hub sees which
+two boxes, when and for how long, and keeps that for 30 days against abuse. It never sees what is sent, and the
+called box is never told who is calling (no caller ID).

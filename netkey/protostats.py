@@ -17,6 +17,7 @@ PROTOCOLS = [
     ("ipx_ii", "IPX · Ethernet_II", "IPX"),
     ("ipx_snap", "IPX · Ethernet_SNAP", "IPX"),
     ("netbeui", "NetBEUI", "NetBEUI"),
+    ("appletalk", "AppleTalk (Macs)", "AppleTalk"),
     ("nbt", "NetBIOS/SMB over TCP/IP", "TCP/IP"),
     ("tcp", "TCP", "TCP/IP"),
     ("udp", "UDP", "TCP/IP"),
@@ -27,6 +28,7 @@ PROTOCOLS = [
     ("other", "Other", "Other"),
 ]
 KEYS = [p[0] for p in PROTOCOLS]
+NEWEST = "appletalk"    # the last key added: a table without its counter is from an older version, made again
 IPX_FRAME_TYPES = {"ipx_8023": "Ethernet_802.3", "ipx_8022": "Ethernet_802.2", "ipx_ii": "Ethernet_II",
                    "ipx_snap": "Ethernet_SNAP"}
 
@@ -38,6 +40,9 @@ MATCH = [
     ("ipx_8022", [f"{LLC} @ll,112,16 0xe0e0"]),                    # LLC DSAP/SSAP E0 (Novell)
     ("ipx_snap", [f"{LLC} @ll,112,16 0xaaaa @ll,160,16 0x8137"]),  # LLC AA + SNAP type 8137
     ("netbeui", [f"{LLC} @ll,112,16 0xf0f0"]),                     # LLC DSAP/SSAP F0 (NetBIOS)
+    # EtherTalk Phase 2 (every Mac with Ethernet): LLC AA + SNAP type 809B (DDP) or 80F3 (AARP); Phase 1: Ethernet II
+    ("appletalk", [f"{LLC} @ll,112,16 0xaaaa @ll,160,16 0x809b", f"{LLC} @ll,112,16 0xaaaa @ll,160,16 0x80f3",
+                   "ether type 0x809b", "ether type 0x80f3"]),
     ("nbt", ["ether type ip udp dport { 137, 138 }", "ether type ip udp sport { 137, 138 }",
              "ether type ip tcp dport { 139, 445 }", "ether type ip tcp sport { 139, 445 }"]),
     ("tcp", ["ether type ip ip protocol tcp"]),

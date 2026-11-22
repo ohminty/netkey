@@ -1,7 +1,10 @@
-"""File sharing to the retro LAN: one folder (share.dir), reachable three ways from the retro PCs only.
+"""File sharing to the retro LAN: one folder (share.dir), reachable four ways from the retro PCs only.
 
   Windows file sharing   Samba (smbd + nmbd) inside the party namespace, guest access, SMB1 so Windows for
                          Workgroups 3.11, 95, 98, ME and XP can use it; the box shows up in Network Neighborhood.
+  Mac file sharing       netatalk (AFP over TCP/IP), guest access, for Mac OS 7.6 to 9 and Mac OS X. Classic Mac
+                         files keep their resource forks: netatalk stores them in "._name" files next to the file
+                         (hidden from the PCs), so the web GUI moves and deletes those along with the file.
   FTP                    logins are the modem users (from the GUI's export, hashed again for this process).
   Web                    a plain HTML 3.2 directory listing old browsers can download from (read only).
 
@@ -41,9 +44,15 @@ SAMBA_LIBEXEC = "/usr/libexec/samba"
 # eight helper programs at once; a Pi 1 needs longer than smbd waits, so nothing ever answers. NetKey runs
 # samba-dcerpcd itself, all the time, with only these.
 RPCDS = ("rpcd_classic", "rpcd_epmapper", "rpcd_lsad", "rpcd_winreg")   # classic needs winreg
-TCP_PORTS = (21, 80, 139, 445)
+SERVICES = ("smb", "afp", "ftp", "web")   # the share.* switches, in the order the GUI lists them
+AFP_DIR = "afp"                          # run dir: netatalk's config; state dir: its file ID database
+NETATALK = "/usr/sbin/netatalk"
+AFP_PORT = 548
+TCP_PORTS = (21, 80, 139, 445, AFP_PORT)
 UDP_PORTS = (137, 138)
 BAD_CHARS = set('/\\:*?"<>|')            # also not allowed by Windows; Samba would mangle them
+# folders the Mac Finder makes on a server volume: kept for the Macs, hidden from the PCs and the GUI
+MAC_FOLDERS = ("Network Trash Folder", "Temporary Items", "TheVolumeSettingsFolder", "TheFindByContentFolder")
 
 
 # ---- names and paths (shared with the web GUI)
@@ -92,7 +101,7 @@ def listing(root, rel=""):
     out = []
     with os.scandir(path) as it:
         for e in it:
-            if e.name.startswith("."):
+            if e.name.startswith(".") or (not rel_parts(rel) and e.name in MAC_FOLDERS):
                 continue
             try:
                 st = e.stat(follow_symlinks=False)
@@ -104,6 +113,32 @@ def listing(root, rel=""):
             out.append({"name": e.name, "dir": is_dir, "size": 0 if is_dir else st.st_size, "mtime": int(st.st_mtime)})
     out.sort(key=lambda x: (not x["dir"], x["name"].lower()))
     return out
+
+
+def fork_file(path):
+    """Where netatalk keeps a Mac file's resource fork: "._name" next to it."""
+    d, n = os.path.split(path)
+    return os.path.join(d, "._" + n)
+
+
+def move(src, dst):
+    """Rename a file or folder, and its Mac resource fork with it."""
+    os.rename(src, dst)
+    if os.path.lexists(fork_file(src)) and not os.path.lexists(fork_file(dst)):
+        try:
+            os.rename(fork_file(src), fork_file(dst))
+        except OSError:
+            pass
+
+
+def remove_fork(path):
+    f = fork_file(path)
+    try:
+        if os.path.isdir(f) and not os.path.islink(f):
+            return                       # a folder someone named "._x": not a fork, leave it
+        os.unlink(f)
+    except OSError:
+        pass
 
 
 def tree_size(path):
@@ -178,8 +213,41 @@ def smb_conf(cfg, run_dir, iface, gateway):
     directory mask = 2775
     force directory mode = 2775
     hide dot files = yes
-    veto files = /.*/
+    veto files = /.*/{"/".join(MAC_FOLDERS)}/
     delete veto files = yes
+"""
+
+
+# ---- netatalk (AFP over TCP/IP; the kernels NetKey runs on have no AppleTalk, so no Chooser browsing)
+def afp_conf(cfg, state_dir, gateway, hostname=None):
+    """netatalk logs to syslog, so its messages are in the journal (journalctl -t afpd)."""
+    s = cfg["share"]
+    name = str(hostname or socket.gethostname()).split(".")[0][:31] or "netkey"
+    return f"""# written by netkey-lan; changes are overwritten
+[Global]
+    server name = {name}
+    hostname = {name}
+    afp listen = {gateway}
+    afp port = {AFP_PORT}
+    cnid listen = 127.0.0.1:4700
+    uam list = uams_guest.so
+    guest account = {SHARE_USER}
+    zeroconf = no
+    spotlight = no
+    mac charset = MAC_ROMAN
+    unix charset = UTF8
+    vol dbpath = {state_dir}/{AFP_DIR}/$v/
+    login message = Welcome to NetKey. These files are shared with the PCs on this retro LAN.
+    log level = default:warn
+
+[{SHARE_NAME}]
+    volume name = {SHARE_NAME}
+    path = {s["dir"]}
+    ea = sys
+    read only = {"no" if s["writable"] else "yes"}
+    file perm = 0664
+    directory perm = 0775
+    umask = 0022
 """
 
 

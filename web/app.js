@@ -502,6 +502,11 @@ const RESULTS = {
   negotiation_failed: { label: "PPP failed", cls: "amber" },
   dropped: { label: "Dropped", cls: "amber" },
   error: { label: "Error", cls: "red" },
+  busy: { label: "Busy", cls: "amber" },
+  no_answer: { label: "No answer", cls: "amber" },
+  missed: { label: "Missed", cls: "amber" },
+  no_dialtone: { label: "No dial tone", cls: "red" },
+  cancelled: { label: "Cancelled", cls: "gray" },
 };
 const LAN_STATES = {
   up: { label: "Active", cls: "green" },
@@ -524,7 +529,9 @@ const statePill = (state) => {
   const s = LINE_STATES[state] || { label: humanize(state || "unknown"), cls: "gray" };
   return html`<span class="pill pill-${raw(s.cls)}">${s.label}</span>`;
 };
-const modeBadge = (mode, title) => (mode === "physical"
+const modeBadge = (mode, title) => (mode === "call"
+  ? html`<span class="badge badge-call" title="${title || "Modem call: a NetKey number or a line on this box"}">CALL</span>`
+  : mode === "physical"
   ? html`<span class="badge badge-pmm" title="${title || "Physical Modem Mode: a real modem answers phone calls"}">PMM</span>`
   : html`<span class="badge badge-vmm" title="${title || "Virtual Modem Mode: the Pi emulates a Hayes modem"}">VMM</span>`);
 const liveCall = (c) => {
@@ -613,7 +620,17 @@ function lineCard(l) {
   return html`<article class="card line-card ${cls}" data-key="line-${l.line}" aria-label="Line ${l.line}">
     <div class="line-head"><span class="line-num">Line ${l.line}</span>${modeBadge(l.mode)}${l.mode_override ? html`<span class="faint" style="font-size:11px" title="Per-line override">override</span>` : ""}${statePill(l.state)}</div>
     <div class="line-adapter" title="${l.device}">${icon("lines")}<span class="ellipsis">${l.adapter || l.device}</span></div>
-    ${c ? html`
+    ${c && c.kind === "call" ? html`
+      <dl class="kv">
+        <dt>Call</dt><dd><b>${c.peer || "Modem call"}</b></dd>
+        <dt>Link</dt><dd class="mono" title="${c.connect}">${c.connect || "—"}</dd>
+        <dt>Duration</dt><dd>${ticking(c.started)}</dd>
+      </dl>
+      <div class="line-rates">
+        <div class="rate"><span class="dir c-rx">${icon("down")}In</span><b>${fmtBytes(c.rx_bytes)}</b><small>from the other side</small></div>
+        <div class="rate"><span class="dir c-tx">${icon("up")}Out</span><b>${fmtBytes(c.tx_bytes)}</b><small>to the other side</small></div>
+      </div>`
+    : c ? html`
       <dl class="kv">
         <dt>User</dt><dd>${c.user ? html`<b>${c.user}</b>` : html`<span class="faint">authenticating…</span>`}</dd>
         <dt>Client IP</dt><dd class="mono">${c.ip || l.client_ip}</dd>
@@ -710,7 +727,7 @@ function recentCallsTable(calls, { compact = false } = {}) {
     <tbody>${calls.map((c) => html`<tr>
       <td class="nowrap" title="${fmtAbs(c.started)}">${fmtWhen(c.started)}</td>
       <td class="nowrap"><span class="mono">${c.line}</span> ${modeBadge(c.mode)}</td>
-      <td>${c.user ? c.user : html`<span class="faint">—</span>`}</td>
+      <td>${c.mode === "call" ? String(c.detail || "Modem call").split(" · ")[0] : c.user ? c.user : html`<span class="faint">—</span>`}</td>
       <td>${resultPill(c)}</td>
       <td class="r nowrap">${c.ended == null ? ticking(c.started) : fmtDur(c.duration_s)}</td>
       <td class="r nowrap hide-sm">${c.ended == null ? (liveCall(c) ? fmtBytes(liveCall(c).rx_bytes + liveCall(c).tx_bytes) : html`<span class="faint">live</span>`) : fmtBytes((c.rx_bytes || 0) + (c.tx_bytes || 0))}</td>
@@ -718,7 +735,7 @@ function recentCallsTable(calls, { compact = false } = {}) {
 }
 
 // retro-LAN traffic by protocol (counted on the Pi's LAN bridge)
-const PROTO_GROUP_COLOR = { IPX: "--accent", NetBEUI: "--amber", "TCP/IP": "--blue", Other: "--text-3" };
+const PROTO_GROUP_COLOR = { IPX: "--accent", NetBEUI: "--amber", AppleTalk: "--violet", "TCP/IP": "--blue", Other: "--text-3" };
 const fmtCount = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : fmtNum(n));
 function protocolCard(d, lan) {
   if (!lan || lan.state === "disabled" || !d) return "";
@@ -970,10 +987,149 @@ function defaultModePicker(mode, busy) {
     </div></section>`;
 }
 
+// ---- phone numbers and modem calls (calls.py on the box): the Modem page's Phone number and Phone book cards
+const EXT_BASE = 5550100;
+const fmtNumber = (n) => { const d = String(n || "").replace(/\D/g, ""); return d.length === 7 ? `${d.slice(0, 3)}-${d.slice(3)}` : d; };
+const extNumber = (line) => fmtNumber(String(EXT_BASE + Number(line)));
+const PRESENCE = { available: { cls: "green", label: "Available" }, busy: { cls: "amber", label: "Busy" }, unreachable: { cls: "gray", label: "Can't be reached" } };
+const NOTIFY_KEY = "netkey-call-notify";
+function callNotifyOn() { try { return localStorage.getItem(NOTIFY_KEY) === "1" && "Notification" in window && Notification.permission === "granted"; } catch { return false; } }
+let ringingSeen = new Set();
+function callNotices(st) {
+  // a browser notification when a virtual line starts ringing (no caller ID: just the line)
+  const now = new Set((st.lines || []).filter((l) => l.mode === "virtual" && l.state === "ringing").map((l) => l.line));
+  if (callNotifyOn()) {
+    for (const n of now) {
+      if (ringingSeen.has(n)) continue;
+      try {
+        const note = new Notification("NetKey: incoming call", { body: `Line ${n} is ringing. Answer on the machine (ATA), or set auto-answer with ATS0=1.`, tag: `netkey-ring-${n}` });
+        note.onclick = () => { window.focus(); location.hash = "#/modem"; note.close(); };
+      } catch { /* the browser refused (e.g. not a secure page) */ }
+    }
+  }
+  ringingSeen = now;
+}
+function phoneWhyNot(p, s, st) {
+  if (!p || !p.number) return "";
+  if (s.incoming === "off") return "Incoming calls are off.";
+  if (s.dnd) return "Do not disturb is on: callers hear BUSY.";
+  const role = st && st.lan && st.lan.role;
+  if (s.busy_in_party && (role === "host" || role === "member")) return "This box is in a LAN party: callers hear BUSY.";
+  if (!(p.lines || []).length) return "No modem line yet: plug in a USB-serial adapter for the machine that should take calls. Until then callers get NO CARRIER.";
+  if (!(p.ready || []).length) return p.reason === "busy" ? "Every line is in a call: callers hear BUSY." : "No line is ready: the machine on a line must be in modem mode (and idle) to ring.";
+  return "";
+}
+function phoneCard(ctx) {
+  const d = ctx.phone, st = S.status;
+  if (!d) return html`<section class="card card-pad" data-key="phone"><div class="skel skel-line" style="width:40%"></div><div class="skel skel-line" style="width:70%"></div></section>`;
+  const p = d.phone || {}, s = Object.assign({ incoming: "off", busy_in_party: true, dnd: false }, d.settings || {}, ctx.opt || {});
+  const lines = (st && st.lines || []).filter((l) => l.mode === "virtual" && l.present !== false);
+  const exts = lines.length ? lines.map((l) => html`<code class="mono">${extNumber(l.line)}</code> for line ${l.line}`) : [];
+  const extText = html`Lines on this box call each other without a number: dial ${exts.length ? exts.map((x, i) => html`${i ? ", " : ""}${x}`) : html`<code class="mono">555-0100</code> for line 0, <code class="mono">555-0101</code> for line 1`}.`;
+  const busy = ctx.busy;
+  if (!d.hub) return html`<section class="card card-pad phone-card" data-key="phone"><h3>${icon("phone")}Phone number</h3><p class="muted">Phone numbers need the NetKey cloud hub, and this box has none configured.</p><p class="faint">${extText}</p></section>`;
+  if (!p.number) {
+    return html`<section class="card card-pad phone-card" data-key="phone">
+      <h3>${icon("phone")}Phone number</h3>
+      <p>Get a NetKey number so the machines on your serial lines can call your friends' boxes, like a modem call in 1995. Amiga, Atari ST and DOS serial games play over the call.</p>
+      <div class="row"><button type="button" class="btn btn-primary" data-action="phone-get" ${busy ? raw("disabled") : ""}>${busy === "get" ? spinner() : icon("plus")}Get a number</button>
+        ${d.lan_running ? "" : html`<span class="faint">The LAN service isn't running.</span>`}</div>
+      <p class="faint">${extText}</p>
+    </section>`;
+  }
+  const on = s.incoming !== "off", why = phoneWhyNot(p, s, st);
+  const sw = (key, label, text, checked, extra = "") => html`<label class="phone-sw"><span><b>${label}</b><small>${text}</small></span>
+    <span class="switch"><input type="checkbox" data-change="phone-set" data-key="${key}" ${checked ? raw("checked") : ""} ${busy ? raw("disabled") : ""} ${raw(extra)}><span class="switch-track"></span></span></label>`;
+  return html`<section class="card card-pad phone-card" data-key="phone">
+    <div class="phone-top">
+      <div><h3>${icon("phone")}Phone number</h3>
+        <div class="phone-num"><span class="mono">${fmtNumber(p.number)}</span><button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="copy-addr" data-text="${fmtNumber(p.number)}" aria-label="Copy the number" title="Copy">${icon("copy")}</button></div>
+        <p class="faint">Friends dial <code class="mono">ATDT${p.number}</code>. Dial theirs the same way: no area code needed.</p></div>
+      <span class="pill ${on && !why ? "pill-green" : "pill-gray"}">${on && !why ? "Taking calls" : "Not taking calls"}</span>
+    </div>
+    <div class="phone-settings">
+      ${sw("phone.incoming", "Allow incoming calls", on ? "Callers you allow reach your ready lines." : "Off: nobody can call this box. You can still call others.", on)}
+      ${on ? html`<div class="phone-who">${segmented([{ value: "book", label: "People in my phone book" }, { value: "anyone", label: "Anyone with my number" }], s.incoming, 'data-action="phone-who"', "seg-sm", "Who may call")}</div>` : ""}
+      ${sw("phone.busy_in_party", "Busy while in a LAN party", "Callers hear BUSY while this box hosts or joins a party.", s.busy_in_party)}
+      ${sw("phone.dnd", "Do not disturb", "Callers hear BUSY. Everything else stays as it is.", s.dnd)}
+      ${sw("notify", "Notify me in this browser", "A notification when a line rings, while this page is open.", callNotifyOn())}
+    </div>
+    ${on && why ? html`<p class="hint">${icon("info", "i-sm")}${why}</p>` : ""}
+    <p class="faint">${extText} There is no caller ID: a ringing line only knows that someone calls.</p>
+    <p class="faint">${icon("lock", "i-sm")} Calls go through NetKey's relays, encrypted from box to box. The hub sees who calls whom and when, never what is sent.</p>
+    <div class="row"><button type="button" class="btn btn-ghost btn-sm" data-action="phone-release" ${busy ? raw("disabled") : ""}>${icon("trash", "i-sm")}Give up this number</button></div>
+  </section>`;
+}
+function phoneBookCard(ctx) {
+  const d = ctx.phone;
+  if (!d || !d.hub || !(d.phone || {}).number) return "";
+  const book = d.book || [], pres = ctx.presence || {}, ed = ctx.edit;
+  const form = (row, idx) => html`<form class="book-form" data-submit="book-save" data-idx="${idx}" autocomplete="off">
+      <input class="input" name="name" placeholder="Name" maxlength="32" value="${row.name || ""}" aria-label="Name">
+      <input class="input mono" name="number" placeholder="555-1234" maxlength="12" value="${row.number ? fmtNumber(row.number) : ""}" aria-label="Number" required>
+      <button class="btn btn-primary btn-sm">${ctx.bookBusy ? spinner() : "Save"}</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-action="book-cancel">Cancel</button></form>`;
+  return html`<section class="card" data-key="phone-book" aria-labelledby="h-book">
+    <div class="card-head"><h3 id="h-book">Phone book</h3><span class="sub">${book.length ? `${book.length} ${book.length === 1 ? "entry" : "entries"}` : "Your friends' numbers"}</span>
+      <span class="spacer"></span>${ed == null ? html`<button type="button" class="btn btn-sm" data-action="book-add">${icon("plus", "i-sm")}Add</button>` : ""}</div>
+    ${ed === -1 ? html`<div class="card-pad">${form({}, -1)}</div>` : ""}
+    ${book.length ? html`<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Number</th><th>Status</th><th class="hide-sm">Dial</th><th></th></tr></thead><tbody>
+      ${book.map((r, i) => ed === i ? html`<tr><td colspan="5">${form(r, i)}</td></tr>` : html`<tr>
+        <td>${r.name || html`<span class="faint">—</span>`}</td>
+        <td class="mono nowrap">${fmtNumber(r.number)}</td>
+        <td>${(() => { const pr = PRESENCE[pres[r.number]]; return pr ? html`<span class="presence"><span class="dot dot-${pr.cls}"></span>${pr.label}</span>` : html`<span class="faint">—</span>`; })()}</td>
+        <td class="hide-sm"><code class="mono">ATDT${r.number}</code></td>
+        <td class="r nowrap"><button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="book-edit" data-idx="${i}" aria-label="Edit ${r.name || fmtNumber(r.number)}">${icon("edit")}</button><button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="book-del" data-idx="${i}" aria-label="Delete ${r.name || fmtNumber(r.number)}">${icon("trash")}</button></td>
+      </tr>`)}</tbody></table></div>`
+      : ed == null ? html`<div class="card-pad"><p class="faint">Add your friends' numbers to see when they can take a call. With "People in my phone book", only these numbers can call you.</p></div>` : ""}
+    ${book.length ? html`<p class="faint card-pad" style="padding-top:0">"Can't be reached": the box is offline, doesn't take calls, or doesn't take them from you.</p>` : ""}
+  </section>`;
+}
+
 const Lines = {
   title: "Modem",
-  mount() { this.pending = {}; this.defaultBusy = null; this.render(); },
+  mount() { this.pending = {}; this.defaultBusy = null; this.phoneBusy = null; this.bookEdit = null; this.phoneOpt = null; this.render(); this.loadPhone(); },
+  unmount() { clearTimeout(this.presTimer); },
+  onVisible() { this.loadPhone(); },
   update() { this.render(); },
+  async loadPhone() {
+    try { this.phone = await api("/api/phone"); }
+    catch (e) { if (e.status !== 401) this.phone = this.phone || { hub: false, book: [], settings: {} }; }
+    if (current === this) this.render();
+    this.loadPresence();
+  },
+  async loadPresence() {
+    clearTimeout(this.presTimer);
+    const d = this.phone;
+    if (d && d.phone && d.phone.number && (d.book || []).length) {
+      try { this.presence = (await api("/api/phone/presence")).numbers || {}; } catch { /* hub unreachable: no dots */ }
+      if (current === this) this.render();
+    }
+    if (current === this && !document.hidden) this.presTimer = setTimeout(() => this.loadPresence(), 30000);
+  },
+  async phoneSave(key, value) {
+    this.phoneOpt = Object.assign({}, this.phoneOpt, { [key.split(".")[1]]: value });
+    this.phoneBusy = "set"; this.render();
+    try {
+      await api("/api/settings", { method: "PUT", body: { values: { [key]: value } } });
+      this.phone = await api("/api/phone");
+      const label = { "phone.incoming": value === "off" ? "Incoming calls off" : value === "book" ? "Calls from your phone book only" : "Anyone with your number can call",
+        "phone.busy_in_party": value ? "Busy while in a LAN party" : "Calls ring during LAN parties too", "phone.dnd": value ? "Do not disturb is on" : "Do not disturb is off" }[key];
+      toast(label, { detail: "The box applies it within a few seconds." });
+    } catch (e) { toastErr(e, "Could not save"); }
+    this.phoneOpt = null; this.phoneBusy = null; this.render();
+  },
+  async bookPut(book, okText) {
+    this.bookBusy = true; this.render();
+    try {
+      const r = await api("/api/phone/book", { method: "PUT", body: { book } });
+      this.phone = Object.assign({}, this.phone, { book: r.book });
+      toast(okText);
+      this.loadPresence();
+      return true;
+    } catch (e) { toastErr(e, "Could not save the phone book"); return false; }
+    finally { this.bookBusy = false; this.render(); }
+  },
   render() {
     const st = S.status;
     const def = st ? st.summary.default_mode : null;
@@ -996,11 +1152,24 @@ const Lines = {
         </div>
         <div class="c-ip"><span class="lbl">Client IP</span><span class="mono">${l.client_ip}</span></div>
         <div class="c-baud"><span class="lbl">Baud</span><span class="mono">${l.baud || "—"}</span></div>
-        <div class="c-del">${!l.present ? html`<button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="line-forget" data-line="${l.line}" aria-label="Forget line ${l.line}" title="Forget this unplugged adapter and free line ${l.line}">${icon("trash")}</button>` : ""}</div>
+        <div class="c-del">${l.call && l.call.kind === "call" || (l.mode === "virtual" && ["ringing", "answering"].includes(l.state)) ? html`<button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="line-hangup" data-line="${l.line}" aria-label="Hang up line ${l.line}" title="Hang up">${icon("x")}</button>` : ""}${!l.present ? html`<button type="button" class="btn btn-ghost btn-icon btn-sm" data-action="line-forget" data-line="${l.line}" aria-label="Forget line ${l.line}" title="Forget this unplugged adapter and free line ${l.line}">${icon("trash")}</button>` : ""}</div>
       </div>`;
     };
     patch(view, html`<div class="stack">
       ${st ? defaultModePicker(this.defaultBusy || def, this.defaultBusy) : ""}
+      <div class="section-head"><h2>How the two modes work</h2><span class="sub">Pick the one that matches how your old machine connects</span></div>
+      <section class="modes-explain" aria-label="The two modem modes">
+        <div class="card mode-explain">
+          <h3>${modeBadge("virtual")} Virtual Modem Mode</h3>
+          <p>The PC's serial port is cabled straight to a USB-serial adapter on the Pi. The Pi answers <code>AT</code> commands like a Hayes modem and "connects" instantly on <code>ATD</code>, no phone line needed. It can also call other lines and other NetKey boxes by number (below).</p>
+          ${diagram([{ icon: "pc", label: "Retro PC" }, { link: "data", label: "RS-232 / USB" }, { icon: "pi", label: "Pi", cls: "pi" }, { link: "data", label: "NAT" }, { icon: "globe", label: "Internet" }])}
+        </div>
+        <div class="card mode-explain">
+          <h3>${modeBadge("physical")} Physical Modem Mode</h3>
+          <p>A real modem on the Pi answers incoming calls over a phone line (or a line simulator). The PC dials with its own modem, exactly like in the 90s. These lines don't take part in calls between boxes.</p>
+          ${diagram([{ icon: "pc", label: "PC" }, { icon: "modem", label: "Modem" }, { link: "phone", label: "☎ phone line" }, { icon: "modem", label: "Modem", cls: "phys" }, { link: "data", label: "serial" }, { icon: "pi", label: "Pi", cls: "pi" }, { link: "data", label: "NAT" }, { icon: "globe", label: "Internet" }])}
+        </div>
+      </section>
       <section class="card" aria-labelledby="h-lines2">
         <div class="card-head"><h3 id="h-lines2">Lines</h3>${st ? html`<span class="sub">${st.summary.lines_registered} of ${st.summary.lines_max} slots · modem options in <a href="#/settings">Settings</a></span>` : ""}</div>
         ${!st ? html`<div class="line-list">${[1, 2, 3].map(() => html`<div class="line-row"><div class="skel skel-line"></div><div class="skel skel-line"></div><div class="skel skel-line"></div><div class="skel skel-line"></div></div>`)}</div>`
@@ -1009,24 +1178,78 @@ const Lines = {
               ${st.lines.map(row)}</div>`
           : emptyState("lines", "No modem lines yet", "Plug a USB-serial adapter into the Pi. It is registered automatically and gets the next free line number (and client IP).")}
       </section>
+      <div class="section-head"><h2>Calls between machines</h2></div>
+      ${st && !(st.lines.some((l) => l.mode === "virtual") || (!st.lines.length && def === "virtual"))
+        ? html`<section class="card card-pad" data-key="phone-pmm"><p class="muted">${icon("info", "i-sm")} Calls between machines (phone numbers and line extensions) work on lines in <b>Virtual Modem Mode</b>. Every line here uses Physical Modem Mode, where a real modem answers real phone calls. Switch a line to Virtual to call other boxes.</p></section>`
+        : html`<div class="grid grid-2 phone-grid">${phoneCard({ phone: this.phone, busy: this.phoneBusy, opt: this.phoneOpt })}${phoneBookCard({ phone: this.phone, presence: this.presence, edit: this.bookEdit, bookBusy: this.bookBusy })}</div>`}
       <p class="faint" style="font-size:12.5px">${icon("info", "i-sm")} Mode changes apply to idle lines within seconds. A line that is in a call keeps its current mode until the caller hangs up.
         Unplugged adapters keep their line; when all ${st ? st.summary.lines_max : ""} lines are taken, a new adapter gets the line of the one unplugged longest.</p>
-      <div class="section-head"><h2>How the two modes work</h2></div>
-      <section class="modes-explain" aria-label="The two modem modes">
-        <div class="card mode-explain">
-          <h3>${modeBadge("virtual")} Virtual Modem Mode</h3>
-          <p>The PC's serial port is cabled straight to a USB-serial adapter on the Pi. The Pi answers <code>AT</code> commands like a Hayes modem and "connects" instantly on <code>ATD</code>, no phone line needed.</p>
-          ${diagram([{ icon: "pc", label: "Retro PC" }, { link: "data", label: "RS-232 / USB" }, { icon: "pi", label: "Pi", cls: "pi" }, { link: "data", label: "NAT" }, { icon: "globe", label: "Internet" }])}
-        </div>
-        <div class="card mode-explain">
-          <h3>${modeBadge("physical")} Physical Modem Mode</h3>
-          <p>A real modem on the Pi answers incoming calls over a phone line (or a line simulator). The PC dials with its own modem, exactly like in the 90s.</p>
-          ${diagram([{ icon: "pc", label: "PC" }, { icon: "modem", label: "Modem" }, { link: "phone", label: "☎ phone line" }, { icon: "modem", label: "Modem", cls: "phys" }, { link: "data", label: "serial" }, { icon: "pi", label: "Pi", cls: "pi" }, { link: "data", label: "NAT" }, { icon: "globe", label: "Internet" }])}
-        </div>
-      </section>
     </div>`);
   },
   actions: {
+    async "phone-get"() {
+      this.phoneBusy = "get"; this.render();
+      try {
+        const r = await api("/api/phone", { method: "POST", body: { cmd: "get_number" } });
+        this.phone = r;
+        toast(r.result.message, { detail: "Allow incoming calls when you want friends to reach you." });
+      } catch (e) { toastErr(e, "Could not get a number"); }
+      this.phoneBusy = null; this.render();
+    },
+    async "phone-release"() {
+      const n = this.phone && this.phone.phone && this.phone.phone.number;
+      const ok = await confirmDialog({ title: `Give up ${fmtNumber(n)}?`, danger: true, confirmText: "Give up number",
+        message: "Friends can't reach this box on it any more. Someone else may get it after 90 days, and this box can get a new number 30 days after it got this one." });
+      if (!ok) return;
+      this.phoneBusy = "release"; this.render();
+      try { this.phone = await api("/api/phone", { method: "POST", body: { cmd: "release" } }); toast("Number given up"); }
+      catch (e) { toastErr(e, "Could not give up the number"); }
+      this.phoneBusy = null; this.render();
+    },
+    async "phone-set"(input) {
+      const k = input.dataset.key;
+      if (k === "notify") {
+        if (input.checked) {
+          if (!("Notification" in window)) { toast("This browser can't show notifications", { type: "err" }); input.checked = false; return; }
+          const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+          if (perm !== "granted") { toast("Notifications are blocked for this page", { type: "err", detail: "Allow them in the browser's site settings." }); input.checked = false; return; }
+        }
+        try { localStorage.setItem(NOTIFY_KEY, input.checked ? "1" : "0"); } catch { /* private window */ }
+        toast(input.checked ? "You'll get a notification when a line rings" : "Call notifications off");
+        this.render();
+        return;
+      }
+      const v = k === "phone.incoming" ? (input.checked ? "book" : "off") : input.checked;
+      await this.phoneSave(k, v);
+    },
+    async "phone-who"(btn) { await this.phoneSave("phone.incoming", btn.dataset.value); },
+    "book-add"() { this.bookEdit = -1; this.render(); const i = $(".book-form input[name=name]"); if (i) i.focus(); },
+    "book-edit"(btn) { this.bookEdit = Number(btn.dataset.idx); this.render(); },
+    "book-cancel"() { this.bookEdit = null; this.render(); },
+    async "book-del"(btn) {
+      const book = [...(this.phone.book || [])], r = book[Number(btn.dataset.idx)];
+      if (!r) return;
+      const ok = await confirmDialog({ title: `Delete ${r.name || fmtNumber(r.number)}?`, confirmText: "Delete", danger: true, message: "If only your phone book may call you, this number can't call you any more." });
+      if (!ok) return;
+      book.splice(Number(btn.dataset.idx), 1);
+      await this.bookPut(book, "Deleted from the phone book");
+    },
+    async "book-save"(form) {
+      const idx = Number(form.dataset.idx), name = form.elements.namedItem("name").value.trim(), number = form.elements.namedItem("number").value.replace(/\D/g, "").slice(-7);
+      if (!/^555[1-9]\d{3}$/.test(number)) return toast("Enter a NetKey number, 555-1000 to 555-9999", { type: "err" });
+      const book = [...(this.phone.book || [])];
+      let nm = name;
+      if (!nm) { try { nm = (await api(`/api/phone/lookup?n=${number}`)).name || ""; } catch (e) { if (e.status === 404) return toast(`No box has ${fmtNumber(number)}`, { type: "err" }); } }
+      const row = { name: nm, number };
+      if (idx < 0) book.push(row); else book[idx] = row;
+      if (await this.bookPut(book, idx < 0 ? `${nm || fmtNumber(number)} added` : "Saved")) this.bookEdit = null;
+      this.render();
+    },
+    async "line-hangup"(btn) {
+      try { await api("/api/phone", { method: "POST", body: { cmd: "hangup", line: Number(btn.dataset.line) } }); toast(`Line ${btn.dataset.line} hung up`); await refreshStatus(); }
+      catch (e) { toastErr(e, "Could not hang up"); }
+    },
+    "copy-addr"(el) { copyText(el.dataset.text).then((ok) => toast(ok ? "Copied" : "Could not copy", { type: ok ? "ok" : "err", detail: el.dataset.text })); },
     async "default-mode"(btn) {
       const m = btn.dataset.value;
       const st = S.status;
@@ -3389,8 +3612,8 @@ const Calls = {
       return html`<tr data-key="c-${c.id}">
       <td class="nowrap" title="${fmtAbs(c.started)}">${fmtWhen(c.started)}<span class="sub">${fmtRel(c.started)}</span></td>
       <td class="nowrap"><span class="mono">${c.line}</span> ${modeBadge(c.mode)}</td>
-      <td>${c.user ? html`<span class="mono">${c.user}</span>` : html`<span class="faint">—</span>`}${c.ip ? html`<span class="sub mono">${c.ip}</span>` : ""}</td>
-      <td>${resultPill(c)}${showDetail ? html`<span class="sub ellipsis" style="max-width:220px;margin-top:2px" title="${c.detail}">${c.detail}</span>` : ""}</td>
+      <td>${c.mode === "call" ? html`<span>${String(c.detail || "Modem call").split(" · ")[0]}</span>` : c.user ? html`<span class="mono">${c.user}</span>` : html`<span class="faint">—</span>`}${c.ip ? html`<span class="sub mono">${c.ip}</span>` : ""}</td>
+      <td>${resultPill(c)}${showDetail && c.mode !== "call" ? html`<span class="sub ellipsis" style="max-width:220px;margin-top:2px" title="${c.detail}">${c.detail}</span>` : ""}</td>
       <td class="r nowrap">${c.ended == null ? ticking(c.started) : fmtDur(c.duration_s)}</td>
       <td class="r"><span class="data-split"><span class="c-rx" title="Down">${icon("down")}${fmtBytes(rx)}</span><span class="c-tx" title="Up">${icon("up")}${fmtBytes(tx)}</span></span></td>
       <td class="mono hide-md" style="font-size:12px" title="${c.detail || ""}">${c.connect || "—"}</td>
@@ -3638,7 +3861,7 @@ const Settings = {
         <div class="fields">${items.map((s) => this.field(s))}</div></details>`;
     };
     // the "lan" and "network" groups are managed on the LAN and Uplink pages (immediate-save switches), not in the generic form
-    const known = new Set(cfg.schema.filter((s) => s.group === "mode" || s.group === "lan" || s.group === "network" || s.group === "share" || GROUPS.some((g) => g.match(s))).map((s) => s.key));
+    const known = new Set(cfg.schema.filter((s) => s.group === "mode" || s.group === "lan" || s.group === "network" || s.group === "share" || s.group === "phone" || GROUPS.some((g) => g.match(s))).map((s) => s.key));
     const other = cfg.schema.filter((s) => !known.has(s.key));
     const hasLan = cfg.schema.some((s) => s.group === "lan");
     const hasNet = cfg.schema.some((s) => s.group === "network");
@@ -3647,7 +3870,7 @@ const Settings = {
       <a class="card lan-link" href="#/parties">${icon("users")}<span><b>Your public nickname and the public parties are on the Parties page</b><small>Choose a nickname there to join, chat and host public parties. Private parties never need one.</small></span>${icon("chevron", "chev")}</a>
       ${GROUPS.map(groupHtml)}
       ${other.length ? html`<section class="card"><div class="card-head"><h3>Other</h3></div><div class="fields">${other.map((s) => this.field(s))}</div></section>` : ""}
-      <a class="card lan-link" href="#/smb">${icon("folder")}<span><b>File sharing settings are on the Fileshare pages</b><small>Windows file sharing (workgroup), FTP and the web server each have their own page under Fileshare.</small></span>${icon("chevron", "chev")}</a>
+      <a class="card lan-link" href="#/smb">${icon("folder")}<span><b>File sharing settings are on the Fileshare pages</b><small>Windows file sharing (workgroup), Mac file sharing, FTP and the web server each have their own page under Fileshare.</small></span>${icon("chevron", "chev")}</a>
       ${hasLan ? html`<a class="card lan-link" href="#/lan">${icon("ethernet")}<span><b>LAN port settings are on the LAN page</b><small>Retro-LAN port on/off, internet sharing and the LAN party (incl. auto-approve) apply immediately there.</small></span>${icon("chevron", "chev")}</a>` : ""}
       ${hasNet ? html`<a class="card lan-link" href="#/network">${icon("wifi")}<span><b>Uplink, Wi-Fi and rescue hotspot are on the Uplink page</b><small>Choose Ethernet or Wi-Fi, join a Wi-Fi network and manage the rescue hotspot there.</small></span>${icon("chevron", "chev")}</a>` : ""}
       <section class="card" aria-labelledby="h-net">
@@ -3787,16 +4010,17 @@ function ipClashBanner(lan) {
     <br><span class="muted">TCP/IP between them fails (IPX and NetBEUI games are fine). It fixes itself within about 5 minutes, when the PCs renew their address. To fix it now, on one of them: Windows 95, 98, ME: Start › Run › <code>winipcfg</code> › Release, then Renew. Windows XP: <code>ipconfig /release</code>, then <code>ipconfig /renew</code>. Or restart the PC.</span></span></div>`;
 }
 
-// ---- file sharing: one folder for the retro LAN, over Windows sharing, FTP and the web (fileshare.py)
+// ---- file sharing: one folder for the retro LAN, over Windows and Mac sharing, FTP and the web (fileshare.py)
 const shareState = () => (S.status && S.status.lan && S.status.lan.fileshare) || null;
 const SHARE_SVC = {
   smb: { route: "smb", title: "Windows file sharing", short: "LAN share", ic: "network", key: "share.smb" },
+  afp: { route: "mac", title: "Mac file sharing", short: "Mac share", ic: "mac", key: "share.afp" },
   ftp: { route: "ftp", title: "FTP server", short: "FTP", ic: "swap", key: "share.ftp" },
   web: { route: "web", title: "Web server", short: "Web", ic: "globe", key: "share.web" },
 };
 const shareAddr = (fsx, k) => {
   const a = fsx && fsx.address ? fsx.address : "10.99.0.1", n = (fsx && fsx.name) || "NETKEY";
-  return k === "smb" ? `\\\\${n}\\${(fsx && fsx.share) || "FILES"}` : k === "ftp" ? `ftp://${a}` : `http://${a}/`;
+  return k === "smb" ? `\\\\${n}\\${(fsx && fsx.share) || "FILES"}` : k === "afp" ? `afp://${a}/` : k === "ftp" ? `ftp://${a}` : `http://${a}/`;
 };
 // running / off / problem / paused, for a service tile or pill
 function shareSvcState(fsx, k) {
@@ -3840,6 +4064,9 @@ const ShareSettings = {
         <span class="switch"><input type="checkbox" id="sw-${k.replace(".", "-")}" data-change="share-switch" data-key="${k}" ${on ? raw("checked") : ""} ${this.cfg && this.saving !== k ? "" : raw("disabled")}><span class="switch-track"></span></span>
       </label></div>`;
   },
+  writableCard() {
+    return this.switchCard("share.writable", "PCs and Macs can change files", this.val("share.writable") ? "They may add, change and delete files in the share over Windows and Mac file sharing." : "Read only: they can open and copy files, not change them.");
+  },
   svcError(k) {
     const s = shareState() && shareState()[k];
     return s && s.enabled && s.error ? html`<div class="banner banner-err" role="alert" data-key="err-${k}">${icon("alert")}<span>${s.error}</span></div>` : "";
@@ -3847,7 +4074,7 @@ const ShareSettings = {
   actions: {
     async "share-switch"(input) {
       const k = input.dataset.key, on = input.checked;
-      const names = { "share.smb": "Windows file sharing", "share.ftp": "FTP server", "share.web": "Web server", "share.writable": "Changing files from PCs" };
+      const names = { "share.smb": "Windows file sharing", "share.afp": "Mac file sharing", "share.ftp": "FTP server", "share.web": "Web server", "share.writable": "Changing files from PCs and Macs" };
       await this.saveKey(k, on, `${names[k] || k} ${on ? "turned on" : "turned off"}`);
     },
     "copy-addr"(el) { copyText(el.dataset.text).then((ok) => toast(ok ? "Copied" : "Could not copy", { type: ok ? "ok" : "err", detail: el.dataset.text })); },
@@ -3869,7 +4096,7 @@ const ShareSmb = {
       ${sharePausedBanner(fsx)}${this.svcError("smb")}
       <section class="grid grid-2 lan-toggles">
         ${this.switchCard("share.smb", "Windows file sharing", "The shared folder appears in Network Neighborhood on the retro LAN. No password.")}
-        ${this.switchCard("share.writable", "PCs can change files", this.val("share.writable") ? "PCs may add, change and delete files in the share." : "Read only: PCs can open and copy files, not change them.")}
+        ${this.writableCard()}
       </section>
       <section class="card card-pad" data-key="smb-ids">
         <div class="share-addrs">${addrBox("Share", shareAddr(fsx, "smb"))}${addrBox("Computer name", name)}${addrBox("By address", `\\\\${(fsx && fsx.address) || "10.99.0.1"}\\FILES`)}</div>
@@ -3902,6 +4129,38 @@ const ShareSmb = {
       this.render();
     },
   },
+};
+
+const ShareMac = {
+  title: "Mac file sharing",
+  ...ShareSettings,
+  mount() { this.cfg = null; this.opt = {}; this.render(); this.loadCfg(); },
+  update() { this.render(); },
+  render() {
+    const fsx = shareState(), a = (fsx && fsx.address) || "10.99.0.1";
+    patch(view, html`<div class="stack">
+      ${sharePausedBanner(fsx)}${this.svcError("afp")}
+      <section class="grid grid-2 lan-toggles">
+        ${this.switchCard("share.afp", "Mac file sharing", "Macs with Ethernet get the shared folder as a disk on their desktop. No password.")}
+        ${this.writableCard()}
+      </section>
+      <section class="card card-pad" data-key="afp-ids"><div class="share-addrs">${addrBox("Server IP address", a)}${addrBox("Mac OS X", `afp://${a}/`)}${addrBox("Disk name", (fsx && fsx.share) || "FILES")}</div></section>
+      <div class="grid grid-2">
+        ${howTo("Mac OS 7.6 to 9", html`<ol><li>Control Panels › <b>TCP/IP</b>: Connect via <b>Ethernet</b>, Configure <b>Using DHCP Server</b>.</li>
+          <li>Open the <b>Chooser</b>, click <b>AppleShare</b>, then <b>Server IP Address…</b> and type <code class="mono">${a}</code>.</li>
+          <li>Choose <b>Guest</b>, then select <b>FILES</b>. The disk appears on the desktop.</li>
+          <li>Make an alias of the disk: double-click it next time to connect again.</li></ol>`)}
+        ${howTo("Mac OS X", html`<ul><li>Finder › Go › <b>Connect to Server</b>, type <code class="mono">afp://${a}/</code> and connect as <b>Guest</b>.</li>
+          <li>Mac OS X 10.1 and later can also use the Windows share: <code class="mono">smb://${a}/FILES</code>.</li></ul>`)}
+        ${howTo("Mac files stay whole", html`<ul><li>Applications, fonts and StuffIt archives copied over Mac file sharing keep their resource fork, type and icon. PCs never see the extra parts.</li>
+          <li>The other ways in (Windows sharing, FTP, uploads on this page) carry only the data. For Mac programs, use <b>.sit</b>, <b>.hqx</b> or <b>.bin</b> files there and open them with StuffIt Expander on the Mac.</li></ul>`)}
+        ${howTo("Network games between Macs", html`<ul><li>The box passes <b>AppleTalk</b> between the Macs on this retro LAN, and to the other boxes in a LAN party, just like IPX for PCs.</li>
+          <li>Control Panels › <b>AppleTalk</b>: Connect via <b>Ethernet</b>. Marathon, Bolo and other AppleTalk games then find each other.</li></ul>`)}
+      </div>
+      <p class="muted lan-note">${icon("lock", "i-sm")} Only Macs on this box's own retro LAN can reach the share, like the Windows share. The box itself doesn't speak AppleTalk, so the Chooser doesn't list it by itself: connect by IP address once and keep the alias.</p>
+    </div>`);
+  },
+  actions: { ...ShareSettings.actions },
 };
 
 const ShareFtp = {
@@ -4191,7 +4450,7 @@ document.addEventListener("dragstart", (e) => {
 document.addEventListener("dragend", () => { Files.dragRow = null; $$(".drop-on", view).forEach((x) => x.classList.remove("drop-on")); });
 
 const ROUTES = { dashboard: Dashboard, modem: Lines, lan: Lan, parties: Parties, network: Network, users: Users, calls: Calls, settings: Settings,
-  files: Files, smb: ShareSmb, ftp: ShareFtp, web: ShareWeb };
+  files: Files, smb: ShareSmb, mac: ShareMac, ftp: ShareFtp, web: ShareWeb };
 let current = null, currentName = null, routing = false;
 
 async function route() {
@@ -4212,9 +4471,9 @@ async function route() {
   currentName = name;
   $$("[data-route]").forEach((a) => (a.dataset.route === name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
   $("#subnav").hidden = !["modem", "users", "calls"].includes(name);       // the modem's pages, as tabs on phones
-  $("#subnav-files").hidden = !["files", "smb", "ftp", "web"].includes(name);
+  $("#subnav-files").hidden = !["files", "smb", "mac", "ftp", "web"].includes(name);
   if (name === "users" || name === "calls") $$('#tabbar [data-route="modem"]').forEach((t) => t.setAttribute("aria-current", "page"));
-  if (["smb", "ftp", "web"].includes(name)) $$('#nav [data-route="files"], #tabbar [data-route="files"]').forEach((t) => t.setAttribute("aria-current", "page"));
+  if (["smb", "mac", "ftp", "web"].includes(name)) $$('#nav [data-route="files"], #tabbar [data-route="files"]').forEach((t) => t.setAttribute("aria-current", "page"));
   $("#page-title").textContent = current.title;
   document.title = `${current.title} · NetKey${S.session && S.session.hostname ? " · " + S.session.hostname : ""}`;
   view.innerHTML = "";
@@ -4251,12 +4510,14 @@ async function refreshStatus() {
     S.status = st;
     S.statusAt = nowS();
     if (st.lan && st.lan.party) partyNotices(st.lan.party);
+    callNotices(st);
     renderChrome();
     if (current && current.update) current.update();
   } catch (e) {
     if (e.status === 401) return;
   }
   if (S.authed && !document.hidden) pollTimer = setTimeout(refreshStatus, 2500);
+  else if (S.authed && callNotifyOn()) pollTimer = setTimeout(refreshStatus, 5000);     // keep listening for rings
 }
 document.addEventListener("visibilitychange", () => {
   if (document.hidden || !S.authed) return;

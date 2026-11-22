@@ -30,7 +30,8 @@ log = logging.getLogger("netkey")
 
 CREDS_FILE = "hub-box.json"   # the LAN service's token; the GUI process keeps its own (WEB_CREDS_FILE)
 WEB_CREDS_FILE = "hub-web.json"
-PROTO = 3                     # 2: relay_host in approvals, relay_moved, /v1/relays, /v1/rtt; 3: box identity, /v1/me
+PROTO = 4                     # 2: relay_host in approvals, relay_moved, /v1/relays, /v1/rtt; 3: box identity, /v1/me
+#                               4: phone numbers and calls between boxes (calls.py)
 PROBE_MAX_AGE_S = 600         # during a party relays are measured again after this long (always before creating one)
 MAX_RELAYS = 128              # relays measured per probe (the hub accepts up to 256 times per report)
 STUN_MAGIC = 0x2112A442
@@ -168,6 +169,7 @@ class HubAgent(threading.Thread):
         self.online = False
         self.error = None
         self.last_ok = None
+        self.callback = None          # callback(event) -> True when it handled the event (then it isn't queued)
         self.stopping = threading.Event()
 
     def run(self):
@@ -176,8 +178,13 @@ class HubAgent(threading.Thread):
             try:
                 d = self.client.call("GET", f"/v1/events?after={self.after}&wait=25", timeout=40)
                 for e in d.get("events", []):
-                    self.events.put(e)
                     self.after = max(self.after, e["seq"])
+                    try:
+                        if self.callback and self.callback(e):
+                            continue
+                    except Exception:  # noqa: BLE001 - a broken handler must not stop the event channel
+                        log.exception("lan: hub event %s", e.get("type"))
+                    self.events.put(e)
                 self.online, self.error, self.last_ok, backoff = True, None, time.time(), 2
             except HubError as e:
                 if self.online or self.error != str(e):

@@ -16,7 +16,7 @@ You type exactly **one command** in the whole guide, and you can copy and paste 
 | **A microSD card** | 8 GB or more. |
 | **A USB network adapter** | A small plug with a network socket ("USB to Ethernet"). Your old PCs connect here. |
 | **Two network cables** | One from the Pi to your router, one from the adapter to the old PC. |
-| **An old PC with a network card** | Windows 95, 98, XP or DOS. |
+| **An old PC with a network card** | Windows 95, 98, XP or DOS. Or a Mac with Ethernet: Mac OS 7.6 to 9, or Mac OS X. |
 | **A network switch** (only for 2+ old PCs) | Plug the old PCs into the switch, and the switch into the adapter. Very old network cards need a switch or hub that does 10 Mbit. |
 | **Your normal computer** | Windows or Mac, for setting things up. |
 
@@ -111,7 +111,22 @@ see when you join their parties.
 4. Restart the old PC.
 5. In NetKey, click **LAN** in the menu. Your PC shows up under **Connected PCs** within a minute.
 
+**A Mac instead?** Control Panels → **TCP/IP**: Connect via **Ethernet**, Configure **Using DHCP Server**. For
+Mac network games, also set Control Panels → **AppleTalk** to **Ethernet**. Macs from before about 1993 that only
+have a LocalTalk (printer) port need an Ethernet adapter first. Older Quadras and Power Macs with an AAUI port need a
+small AAUI-to-Ethernet transceiver.
+
 Want the old PC on the internet too? On the **LAN** page, turn on **Share my internet with the LAN**.
+
+**Sharing files:** the box has one shared folder for all your old machines. Windows PCs find it in **Network
+Neighborhood** as `NETKEY`. Macs connect in the **Chooser → AppleShare → Server IP Address** with `10.99.0.1` (or
+`afp://10.99.0.1/` on Mac OS X). DOS PCs can use FTP. Put files in from your normal computer on the **Fileshare**
+page. Each way in has its own page with step-by-step help.
+
+**Calling a friend's machine (serial lines):** on the **Modem** page, click **Get a number** and switch on
+**Allow incoming calls**. A machine on a serial line dials a friend's number like a modem: `ATDT5553870`. The
+friend's machine answers with `ATA` (or `ATS0=1` to answer by itself), and serial games can play over the call. Two
+lines on your own box call each other without a number: `555-0100` is line 0, `555-0101` line 1.
 
 ## Step 8: Your first LAN party
 
@@ -149,6 +164,8 @@ the same command). Your settings, password and name are kept.
 | **The old PC doesn't show up** under Connected PCs | Check the cable and that the network card's light is on. Restart the old PC. |
 | **A friend is stuck on "Waiting for the host"** | The host must click **Approve** on their Parties page. |
 | **The game doesn't find the other players** | Make sure every PC uses the same protocol (IPX or TCP/IP) and that the game is set to LAN/network. |
+| **A call says `BUSY`** | The other box is in a call or a LAN party, has do not disturb on, or only takes calls from its phone book. |
+| **A call says `NO CARRIER` straight away** | The number doesn't exist, or that box is offline or doesn't take calls. Your own dial-up still works with any number that doesn't start with 555. |
 | **Forgot the NetKey password** | Log in as in step 3 and type `sudo netkey-passreset`. The login goes back to **admin** / **admin**. |
 | **"Host key verification failed"** after setting up the card again | Type `ssh-keygen -R netkey.local` on your computer, then try step 3 again. |
 | **The Pi lost its Wi-Fi** | After 5 minutes it makes its own Wi-Fi called **NetKey-XXXX** (password `netkeyrescue`). Connect to it and open **http://192.168.4.1** to fix the settings. |

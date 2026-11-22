@@ -30,7 +30,7 @@ if [[ -f /etc/ppp/pap-secrets ]]; then
     sed -i '/^# BEGIN netkey/,/^# END netkey/d' /etc/ppp/pap-secrets
 fi
 ((PURGE)) && rm -rf /etc/netkey /var/lib/netkey /var/lib/netkey-update
-systemctl unmask -q smbd.service nmbd.service samba-ad-dc.service 2>/dev/null || true   # masked by install.sh
+systemctl unmask -q smbd.service nmbd.service samba-ad-dc.service netatalk.service 2>/dev/null || true   # masked by install.sh
 systemctl daemon-reload
 udevadm control --reload
 id netkey &>/dev/null && userdel netkey

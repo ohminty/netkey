@@ -1,4 +1,7 @@
-"""Serial session: command mode with autobaud, then hands the open tty to pppd for the call."""
+"""Serial session: command mode with autobaud, then hands the open tty to pppd for the call.
+
+Virtual Modem Mode lines also take part in modem calls (calls.py): 555 numbers ring other lines or other boxes, and
+the session pumps the bytes of such a call itself (no pppd), with +++ / ATO / ATH like a real modem."""
 import errno
 import fcntl
 import logging
@@ -9,8 +12,9 @@ import subprocess
 import termios
 import time
 
+from . import calls as cl
 from . import status as st
-from .atparser import ATParser
+from .atparser import Answer, ATParser, Dial, Hangup, Online
 
 log = logging.getLogger("netkey")
 
@@ -78,6 +82,9 @@ class Session:
         self.modem_model = None
         self.last_call_id = None
         self.last_reason = ""
+        self.calls = None if self.physical else cl.CallClient(self.line, cfg.get("calls_socket"))
+        self.ring = None                 # {"call", "count", "next"} while a call rings this line
+        self.confirmed_baud = None       # speed of the last AT command understood (RING goes out at this speed)
 
     def stop(self, *_):
         self.stopping = True
@@ -285,6 +292,7 @@ class Session:
         self.set_state(st.IDLE, "Waiting for ATD")
         while not self.stopping:
             self.heartbeat()
+            self.call_tick()
             r, _, _ = select.select([self.fd], [], [], 0.1)
             if self.pc_dtr_dropped() and self.parser.amp_d:
                 log.info("PC dropped DTR in command mode")
@@ -314,14 +322,23 @@ class Session:
                 log.info("autobaud -> %d", self.baud)
                 continue
             self.fast_mode = False
-            out, dial = self.parser.feed(data)
+            out, action = self.parser.feed(data)
             for line in self.parser.commands:
                 log.info("CMD %s", line)
+            if self.parser.commands:
+                self.confirmed_baud = self.baud
             self.write(out)
-            if dial:
-                self.dial(dial.number)
+            if isinstance(action, Dial):
+                self.dial(action.number)
+            elif isinstance(action, Answer):
+                self.answer_call()
+            elif isinstance(action, (Online, Hangup)):
+                self.write(self.parser.result("NO CARRIER" if isinstance(action, Online) else "OK"))
 
     def dial(self, number):
+        kind, _ = cl.classify(number)
+        if kind != "ppp" and self.calls is not None and self.netkey_dial(number, kind):
+            return
         self.set_state(st.DIALING, f"ATD{number}".strip())
         deadline = time.monotonic() + float(self.cfg["modem"]["dial_delay_s"])
         while time.monotonic() < deadline:
@@ -343,6 +360,301 @@ class Session:
         self.set_carrier(True)
         self.data_mode(connect)
         self.after_call()
+
+    # modem calls (calls.py): ringing, answering, dialing 555 numbers, and the call's data pump
+    def listening(self):
+        """Is the machine on this line in modem mode? Only knowable when the cable carries DTR."""
+        src = self.serial["pc_dtr_input"]
+        if not self.lines_ok or src == "none":
+            return True
+        try:
+            bits = self.modem_bits()
+        except OSError:
+            return False
+        return bool(bits & (termios.TIOCM_DSR if src == "dsr" else termios.TIOCM_CAR))
+
+    def call_tick(self):
+        if self.calls is None:
+            return
+        self.calls.update(self.ring is None and self.listening(), self.confirmed_baud or self.baud)
+        now = time.monotonic()
+        for msg in self.calls.poll():
+            op, cid = msg.get("op"), msg.get("call")
+            if op == "ring" and self.ring is None:
+                self.ring = {"call": cid, "count": 0, "next": now}
+                if self.confirmed_baud and self.confirmed_baud != self.baud:
+                    self.baud = self.confirmed_baud          # ring at the speed the machine last talked at
+                    self.set_termios()
+                log.info("incoming call")
+                self.set_state(st.RINGING, "Incoming call")
+            elif op == "stop_ring" and self.ring and self.ring["call"] == cid:
+                self.ring = None
+                self.parser.p.sregs[1] = 0
+                if msg.get("missed"):
+                    log.info("missed call")
+                    t = time.time()
+                    cid_db = self.db("start_call", self.line, "call", "", t, result="missed")
+                    if cid_db is not None:
+                        self.db("update_call", cid_db, ended=t, detail="Incoming call")
+                self.set_state(st.IDLE, "Waiting for ATD")
+        if self.ring and now >= self.ring["next"]:
+            self.ring["count"] += 1
+            self.ring["next"] = now + cl.RING_EVERY_S
+            self.parser.p.sregs[1] = min(self.ring["count"], 255)
+            self.write(self.parser.result("RING"))
+            s0 = self.parser.p.sregs.get(0, 0)
+            if s0 and self.ring["count"] >= s0:
+                self.answer_call()
+
+    def keypress(self):
+        r, _, _ = select.select([self.fd], [], [], 0)
+        return bool(r and self.read())
+
+    def call_failed(self, result, detail, code):
+        t = time.time()
+        cid = self.db("start_call", self.line, "call", "", t, result=result)
+        if cid is not None:
+            self.db("update_call", cid, ended=t, detail=detail)
+        self.write(self.parser.result(code))
+        self.set_state(st.IDLE, "Waiting for ATD")
+
+    def netkey_dial(self, number, kind):
+        """Extensions and NetKey numbers. False: dial-up internet after all (this box has no number)."""
+        n = cl.digits(number)[-7:]
+        who = f"line {int(n) - cl.EXT_BASE}" if kind == "ext" else cl.fmt_number(n)
+        self.set_state(st.DIALING, f"Calling {who}")
+        self.calls.update(False, self.confirmed_baud or self.baud, force=True)
+        r = self.calls.request("dial", "dial_result", 30, abort=self.keypress, number=n)
+        if r is None:
+            if kind == "number":
+                return False
+            self.call_failed("no_dialtone", f"To {who}", "NO DIALTONE")
+            return True
+        res = r.get("result")
+        if res == "ppp":
+            return False
+        if res == "abort":
+            self.calls.send(op="cancel", line=self.line, call=r.get("call"))
+            self.call_failed("cancelled", f"To {who}", "NO CARRIER")
+            return True
+        if res != "ringing":
+            code = {"busy": "BUSY", "no_dialtone": "NO DIALTONE"}.get(res, "NO CARRIER")
+            self.call_failed(res if res in ("busy", "no_dialtone") else "no_carrier", f"To {who}", code)
+            return True
+        try:
+            sock = self.calls.attach(r["call"])
+        except OSError:
+            self.call_failed("no_carrier", f"To {who}", "NO CARRIER")
+            return True
+        self.set_state(st.DIALING, f"Calling {who}, ringing")
+        reader = cl.FrameReader()
+        s7 = max(int(self.parser.p.sregs.get(7, 50)), 5)
+        deadline = time.monotonic() + s7
+        outcome = None
+        try:
+            while outcome is None:
+                if self.stopping:
+                    outcome = ("NO CARRIER", "cancelled")
+                    break
+                if time.monotonic() > deadline:
+                    sock.sendall(cl.frame(cl.HANGUP, '{"reason":"no_answer"}'))
+                    outcome = ("NO ANSWER", "no_answer")
+                    break
+                rr, _, _ = select.select([self.fd, sock], [], [], 0.1)
+                if self.fd in rr and self.read():
+                    sock.sendall(cl.frame(cl.HANGUP, '{"reason":"cancel"}'))
+                    outcome = ("NO CARRIER", "cancelled")
+                    break
+                if sock in rr:
+                    try:
+                        chunk = sock.recv(8192)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        outcome = ("NO CARRIER", "no_carrier")
+                        break
+                    for k, payload in reader.feed(chunk):
+                        if k == cl.ANSWER:
+                            sock.sendall(cl.frame(cl.CONNECTED))
+                            outcome = ("CONNECT", None)
+                            break
+                        if k == cl.HANGUP:
+                            reason = cl.payload_json(payload).get("reason")
+                            outcome = {"no_answer": ("NO ANSWER", "no_answer"),
+                                       "busy": ("BUSY", "busy")}.get(reason, ("NO CARRIER", "no_carrier"))
+                            break
+        except (OSError, cl.FrameError):
+            outcome = ("NO CARRIER", "no_carrier")
+        if outcome[0] != "CONNECT":
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self.call_failed(outcome[1], f"To {who}", outcome[0])
+            return True
+        self.call_mode(sock, reader, f"To {who}")
+        return True
+
+    def answer_call(self):
+        ring, self.ring = self.ring, None
+        self.parser.p.sregs[1] = 0
+        if not ring or self.calls is None:
+            self.write(self.parser.result("NO CARRIER"))
+            return
+        r = self.calls.request("answer", "answer_result", 5, call=ring["call"])
+        if not r or not r.get("ok"):
+            self.write(self.parser.result("NO CARRIER"))
+            self.set_state(st.IDLE, "Waiting for ATD")
+            return
+        self.set_state(st.ANSWERING, "Answering")
+        reader = cl.FrameReader()
+        try:
+            sock = self.calls.attach(ring["call"])
+            sock.sendall(cl.frame(cl.ANSWER))
+            deadline = time.monotonic() + cl.ANSWER_CONFIRM_S
+            confirmed = False
+            while not confirmed and time.monotonic() < deadline:
+                rr, _, _ = select.select([sock], [], [], 0.1)
+                if not rr:
+                    continue
+                chunk = sock.recv(8192)
+                if not chunk:
+                    break
+                for k, _ in reader.feed(chunk):
+                    if k == cl.CONNECTED:
+                        confirmed = True
+                    elif k == cl.HANGUP:
+                        deadline = 0
+        except (OSError, cl.FrameError, BlockingIOError):
+            confirmed = False
+        if not confirmed:
+            try:
+                sock.close()
+            except (OSError, UnboundLocalError):
+                pass
+            self.write(self.parser.result("NO CARRIER"))
+            self.set_state(st.IDLE, "Waiting for ATD")
+            return
+        self.call_mode(sock, reader, "Incoming call")
+
+    def call_mode(self, sock, reader, detail):
+        """CONNECT, then pump bytes between the serial port and the call until either side hangs up."""
+        connect = self.parser.connect_text()
+        self.write(self.parser.result(connect))
+        try:
+            termios.tcdrain(self.fd)
+        except termios.error:
+            pass
+        self.set_carrier(True)
+        started = time.time()
+        self.call = {"connect": connect, "started": started, "rx_bytes": 0, "tx_bytes": 0, "user": None, "ip": None,
+                     "iface": None, "kind": "call", "peer": detail}
+        call_id = self.db("start_call", self.line, "call", connect, started)
+        if call_id is not None:
+            self.db("update_call", call_id, detail=detail)
+        self.set_state(st.CONNECTED, f"{connect} · {detail}")
+        log.info("%s @%d baud, modem call (%s)", connect, self.baud, detail)
+        sregs = self.parser.p.sregs
+        esc = sregs.get(2, 43)
+        guard = sregs.get(12, 50) / 50.0
+        held, held_at, last_tx = bytearray(), 0.0, time.monotonic()
+        escaped, backlog = False, bytearray()
+        reason, remote_ended, result_text = None, False, "NO CARRIER"
+
+        def send_data(data):
+            for i in range(0, len(data), cl.DATA_CHUNK):
+                sock.sendall(cl.frame(cl.DATA, bytes(data[i:i + cl.DATA_CHUNK])))
+            self.call["tx_bytes"] += len(data)
+        try:
+            sock.setblocking(True)
+            while reason is None:
+                if self.stopping:
+                    reason = "service stopping"
+                    break
+                if self.pc_dtr_dropped() and self.parser.amp_d:
+                    reason = "PC dropped DTR"
+                    break
+                now = time.monotonic()
+                if held and now - held_at >= guard:
+                    if len(held) == 3 and esc <= 127:
+                        escaped, held = True, bytearray()
+                        self.parser.call_held = True
+                        self.parser.reset_line()
+                        self.write(self.parser.result("OK"))
+                        self.set_state(st.CONNECTED, f"{connect} · {detail} · command mode")
+                    else:
+                        send_data(held)
+                        held = bytearray()
+                rr, _, _ = select.select([self.fd, sock], [], [], 0.05)
+                if self.fd in rr:
+                    data = self.read()
+                    now = time.monotonic()
+                    if escaped:
+                        out, action = self.parser.feed(data)
+                        self.write(out)
+                        if isinstance(action, Online):
+                            escaped = False
+                            self.parser.call_held = False
+                            self.write(self.parser.result(connect))
+                            if backlog:
+                                self.write(bytes(backlog))
+                                backlog = bytearray()
+                            self.set_state(st.CONNECTED, f"{connect} · {detail}")
+                        elif isinstance(action, Hangup):
+                            reason, result_text = "ATH", "OK"
+                        elif isinstance(action, (Dial, Answer)):
+                            self.write(self.parser.result("ERROR"))
+                    elif esc <= 127 and all(b == esc for b in data) and len(held) + len(data) <= 3 and \
+                            (held or now - last_tx >= guard):
+                        if not held:
+                            held_at = now
+                        held += data
+                        held_at = now
+                    else:
+                        if held:
+                            data = bytes(held) + data
+                            held = bytearray()
+                        send_data(data)
+                        last_tx = now
+                if sock in rr:
+                    chunk = sock.recv(8192)
+                    if not chunk:
+                        reason, remote_ended = "connection to the LAN service closed", True
+                        break
+                    for k, payload in reader.feed(chunk):
+                        if k == cl.DATA:
+                            self.call["rx_bytes"] += len(payload)
+                            if escaped:
+                                if len(backlog) < 65536:
+                                    backlog += payload
+                            else:
+                                self.write(payload)
+                        elif k == cl.HANGUP:
+                            reason, remote_ended = "other side hung up", True
+                            break
+                if time.monotonic() - self.last_status >= CALL_STATUS_S:
+                    self.write_status()
+        except (OSError, cl.FrameError) as e:
+            if isinstance(e, DeviceGone):
+                raise
+            reason, remote_ended = f"call link: {e}", True
+        finally:
+            if not remote_ended:
+                try:
+                    sock.sendall(cl.frame(cl.HANGUP, '{"reason":"hangup"}'))
+                except OSError:
+                    pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+            log.info("modem call ended: %s", reason)
+            c = self.call or {}
+            if call_id is not None:
+                self.db("update_call", call_id, ended=time.time(), rx_bytes=c.get("rx_bytes", 0),
+                        tx_bytes=c.get("tx_bytes", 0), result="ok", detail=f"{detail} · {reason}")
+            self.call = None
+        self.after_call(result_text)
 
     # data mode
     def data_mode(self, connect):
@@ -456,13 +768,14 @@ class Session:
             self.child.kill()
             self.child.wait()
 
-    def after_call(self):
+    def after_call(self, result="NO CARRIER"):
         try:
             self.set_termios()
             termios.tcflush(self.fd, termios.TCIFLUSH)
             self.set_carrier(False)
             self.parser.reset_line()
-            self.write(self.parser.result("NO CARRIER"))
+            self.parser.call_held = False
+            self.write(self.parser.result(result))
         except termios.error as e:
             raise DeviceGone(e) from e
         self.set_state(st.IDLE, "Waiting for ATD")
