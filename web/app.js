@@ -147,20 +147,21 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 // toasts
-function toast(msg, { type = "ok", detail = "", timeout = 4500 } = {}) {
+function toast(msg, { type = "ok", detail = "", timeout = 4500, action = null } = {}) {
   const box = $("#toasts");
   const el = document.createElement("div");
   el.className = `toast ${type}`;
   el.setAttribute("role", type === "err" ? "alert" : "status");
   const ic = type === "err" ? "alert" : type === "info" ? "info" : "check";
   el.innerHTML = String(html`${icon(ic)}<div class="tb"><span>${msg}</span>${detail ? html`<small>${detail}</small>` : ""}</div>
-    <button type="button" aria-label="Dismiss">${icon("x", "i-sm")}</button><i class="bar" style="animation-duration:${timeout}ms"></i>`);
+    ${action ? html`<button type="button" class="toast-act">${action.label}</button>` : ""}<button type="button" class="toast-x" aria-label="Dismiss">${icon("x", "i-sm")}</button><i class="bar" style="animation-duration:${timeout}ms"></i>`);
   const close = () => {
     if (el.classList.contains("leaving")) return;
     el.classList.add("leaving");
     setTimeout(() => el.remove(), 200);
   };
-  el.querySelector("button").addEventListener("click", close);
+  el.querySelector(".toast-x").addEventListener("click", close);
+  if (action) el.querySelector(".toast-act").addEventListener("click", () => { close(); action.fn(); });
   let timer = setTimeout(close, timeout);
   el.addEventListener("mouseenter", () => { clearTimeout(timer); el.querySelector(".bar").style.animationPlayState = "paused"; });
   el.addEventListener("mouseleave", () => { timer = setTimeout(close, 1800); });
@@ -604,6 +605,9 @@ function renderChrome() {
   }
   if (!S.online) banners.push(html`<div class="banner banner-warn" role="status">${spinner()}<span><b>Connection lost.</b> <span class="muted">Retrying… the values below may be stale.</span></span></div>`);
   if (st && st.admin && st.admin.default_credentials && currentName !== "settings") banners.push(html`<div class="banner banner-warn" role="alert">${icon("lock")}<span><b>Default login is still set.</b> <span class="muted">Anyone on your network can use admin / admin.</span> <a href="#/settings">Change it</a></span></div>`);
+  const uv = st && st.power && st.power.undervoltage_seen;
+  if (uv && currentName === "dashboard" && nowS() - Number(store.get("power-dismissed", 0)) > 86400) banners.push(html`<div class="banner banner-warn" role="alert" data-key="power">${icon("alert")}<span><b>The power supply is too weak.</b> <span class="muted">The Pi reported undervoltage ${relTime(uv)}. That can corrupt the memory card and cause random problems. Use the official Raspberry Pi power supply, or a shorter, thicker USB cable.</span></span>
+    <button type="button" class="btn btn-sm btn-ghost" data-action="power-seen" title="Hide this for a day">Dismiss</button></div>`);
   if (st && st.service.manager === "stopped") banners.push(html`<div class="banner banner-err" role="alert">${icon("alert")}<span><b>Modem service is not running.</b> <span class="muted">No line can answer calls. Start it on the Pi with <code>sudo systemctl start netkey-modem</code>.</span></span></div>`);
   patch($("#banners"), html`${banners}`);
 }
@@ -3744,6 +3748,103 @@ function updateDialog(u) {
     foot: html`${u.url ? html`<a class="btn btn-ghost" href="${u.url}" target="_blank" rel="noopener noreferrer">${icon("external")}Release page</a>` : ""}<span class="spacer"></span><button type="button" class="btn btn-primary" data-close>Done</button>`,
   });
 }
+// a POST that answers with a file: save it under the server's name
+async function apiDownload(path, body) {
+  let res;
+  try {
+    res = await fetch(path, { method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "X-Requested-With": "netkey", "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  } catch { throw new ApiError("Cannot reach the NetKey web service. Check the network connection.", 0); }
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch { /* not JSON */ }
+    if (res.status === 401) onUnauthorized();
+    throw new ApiError((data && data.error) || `Request failed (HTTP ${res.status})`, res.status, data);
+  }
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+  const name = m ? decodeURIComponent(m[1]) : "netkey-download";
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return name;
+}
+
+// backup & restore (backup.py) and the diagnostics report (diagnose.sh via netkey-diag.service)
+function backupCard(diagBusy) {
+  return html`<section class="card" aria-labelledby="h-bk" data-key="backup">
+    <div class="card-head">${icon("database")}<h3 id="h-bk">Backup and restore</h3><span class="sub">Keep a copy of this box's setup, for a new SD card or a new Pi</span></div>
+    <div class="card-pad bk">
+      <p class="faint">The backup holds the settings, dial-in users (with their passwords), per-line modes, the phone book and the box identity, so your nickname and phone number stay with you. It is encrypted with a passphrase you choose. Not included: call history, statistics, Wi-Fi passwords and the shared files.</p>
+      <div class="row wrap"><button type="button" class="btn btn-primary" data-action="backup-make">${icon("download")}Download backup</button>
+        <button type="button" class="btn" data-action="backup-restore">${icon("up")}Restore a backup…</button></div>
+    </div>
+  </section>
+  <section class="card" aria-labelledby="h-diag" data-key="diag">
+    <div class="card-head">${icon("info")}<h3 id="h-diag">Help and diagnostics</h3><span class="sub">A health report to send when you ask for help</span></div>
+    <div class="card-pad bk">
+      <p class="faint">A text file about the box's health: services, modem lines, the LAN port, internet connection, power supply and recent log lines. It holds addresses and device names, no passwords. Nothing is sent anywhere: you choose whom to give it to.</p>
+      <div class="row wrap"><button type="button" class="btn" data-action="diag-make" ${diagBusy ? raw("disabled") : ""}>${diagBusy ? spinner() : icon("download")}${diagBusy ? "Making the report…" : "Download diagnostics"}</button></div>
+    </div>
+  </section>`;
+}
+const BACKUP_ACTIONS = {
+  "backup-make"() {
+    openModal({
+      title: "Download a backup", iconName: "database",
+      body: html`<p class="faint">Choose a passphrase. You need it to restore, and nobody can open the backup without it, not even NetKey support. Keep it somewhere safe.</p>
+        <label class="field"><span class="field-label">Passphrase (8 or more characters)</span><input class="input" type="password" name="pass" minlength="8" autocomplete="new-password" required></label>
+        <label class="field"><span class="field-label">Repeat the passphrase</span><input class="input" type="password" name="pass2" autocomplete="new-password" required></label>
+        <label class="field"><span class="field-label">Admin password</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>`,
+      foot: html`<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn btn-primary">Download</button>`,
+      onSubmit: async (form) => {
+        const pass = form.pass.value;
+        if (pass.length < 8) throw new Error("The passphrase needs at least 8 characters.");
+        if (pass !== form.pass2.value) throw new Error("The two passphrases are not the same.");
+        const name = await apiDownload("/api/backup", { passphrase: pass, password: form.password.value });
+        toast("Backup downloaded", { detail: `${name}. Keep it and the passphrase safe.` });
+      },
+    });
+  },
+  "backup-restore"() {
+    let text = null, info = null;
+    const m = openModal({
+      title: "Restore a backup", iconName: "up", iconCls: "danger",
+      body: html`<p class="faint">This replaces the settings, dial-in users, line modes and phone book on this box with the ones in the backup. If the backup is from another box, this box takes over its identity: its nickname and phone number. <b>Don't keep using the old box after that.</b></p>
+        <label class="field"><span class="field-label">Backup file (.nkbackup)</span><input class="input" type="file" name="file" accept=".nkbackup,application/json,application/octet-stream" required></label>
+        <p class="faint bk-info" data-bk-info></p>
+        <label class="field"><span class="field-label">Its passphrase</span><input class="input" type="password" name="pass" autocomplete="off" required></label>
+        <label class="field"><span class="field-label">Admin password of this box</span><input class="input" type="password" name="password" autocomplete="current-password" required></label>`,
+      foot: html`<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn btn-danger">Restore</button>`,
+      onSubmit: async (form) => {
+        if (!text) throw new Error("Choose the backup file first.");
+        const r = await api("/api/backup/restore", { method: "POST", body: { file: text, passphrase: form.pass.value, password: form.password.value } });
+        toast("Backup restored", { detail: `${r.settings} settings, ${r.users} dial-in user${r.users === 1 ? "" : "s"}, ${r.phone_book} phone book entr${r.phone_book === 1 ? "y" : "ies"}${r.identity ? ", and the box identity" : ""}.${r.skipped && r.skipped.length ? ` Skipped ${r.skipped.length} setting${r.skipped.length === 1 ? "" : "s"} this version doesn't know.` : ""}`, timeout: 9000 });
+        if (current && current.load) current.load();
+      },
+    });
+    m.el.file.addEventListener("change", async () => {
+      const f = m.el.file.files[0], out = m.el.querySelector("[data-bk-info]");
+      text = null; info = null; out.textContent = "";
+      if (!f) return;
+      if (f.size > 60000) { out.textContent = "That file is too big to be a NetKey backup."; return; }
+      text = await f.text();
+      try { info = JSON.parse(text); } catch { info = null; }
+      if (!info || info.format !== "netkey-backup") { text = null; out.textContent = "That is not a NetKey backup file."; return; }
+      out.textContent = `From ${info.box || "a NetKey box"}, made ${new Date(info.made * 1000).toLocaleString()} with NetKey ${info.netkey || "?"}.`;
+    });
+  },
+  async "diag-make"() {
+    if (this.diagBusy) return;
+    this.diagBusy = true; this.render();
+    try { const name = await apiDownload("/api/diagnostics", {}); toast("Diagnostics downloaded", { detail: name }); }
+    catch (e) { toastErr(e, "Could not make the report"); }
+    this.diagBusy = false; this.render();
+  },
+};
+
 function softwareCard(u, busy) {
   const cur = (u && u.current) || (S.status && S.status.version) || "—";
   const state = !u ? html`<span class="pill pill-gray">Not checked yet</span>`
@@ -3884,6 +3985,7 @@ const Settings = {
         </div>
       </section>
       ${softwareCard(S.status && S.status.update, this.checking)}
+      ${backupCard(this.diagBusy)}
       <section class="card" aria-labelledby="h-pw">
         <div class="card-head">${icon("lock")}<h3 id="h-pw">Admin login</h3><span class="sub">Username and password for this web interface (password min. 6 characters)</span></div>
         <form class="pw-form" id="pw-form" novalidate autocomplete="off">
@@ -3938,6 +4040,7 @@ const Settings = {
   },
   onSave() { this.save(); },
   actions: {
+    ...BACKUP_ACTIONS,
     "settings-retry"() { this.loadError = null; this.render(); this.load(); },
     "settings-find"(input) {
       // filters the rows already on the page; matching groups open so the hit is visible
@@ -4345,7 +4448,8 @@ const Files = {
           : html`<div class="table-wrap"><table class="table files-table"><thead><tr><th class="sel-col"><input type="checkbox" class="file-check" data-action="files-check-all" ${d.entries.length && this.sel.size === d.entries.length ? raw("checked") : ""} aria-label="Select all"></th><th>Name</th><th class="r hide-sm">Size</th><th class="hide-sm">Modified</th><th class="r"><span class="sr-only">Actions</span></th></tr></thead>
               <tbody>${this.path ? html`<tr data-key="f-up" data-drop-dir="${this.path.split("/").slice(0, -1).join("/")}"><td></td><td colspan="4"><button type="button" class="file-name" data-action="files-go" data-path="${this.path.split("/").slice(0, -1).join("/")}"><span class="pc-ic is-folder">${icon("folder")}</span><span class="muted">..  (up one folder)</span></button></td></tr>` : ""}${d.entries.map(row)}</tbody></table></div>`}
         <div class="drop-hint" aria-hidden="true">${icon("up")}<b>Drop to upload into ${this.path ? `/${this.path}` : "the shared folder"}</b></div>
-        ${d ? html`<p class="card-note" data-key="fnote">${icon("database", "i-sm")}${fmtBytes(free)} free for uploads on the memory card · tick rows (or Shift-click a range) to move or delete several at once · drag rows onto a folder to move them</p>` : ""}
+        ${d ? html`<div class="card-note files-foot" data-key="fnote"><span>${icon("database", "i-sm")}${fmtBytes(free)} free for uploads on the memory card · tick rows (or Shift-click a range) to move or delete several at once · drag rows onto a folder to move them</span>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="files-trash">${icon("trash")}Trash${d.trash && d.trash.count ? html` <span class="faint tnum">${d.trash.count} · ${fmtBytes(d.trash.size)}</span>` : ""}</button></div>` : ""}
       </section>
     </div>`);
   },
@@ -4393,7 +4497,8 @@ const Files = {
       if (!overwrite) return;
     }
     const size = list.reduce((a, x) => a + x.file.size, 0);
-    if (this.data && size > this.data.free - this.data.reserve) return toast("Not enough space on the memory card", { type: "err", detail: `${fmtBytes(size)} to upload, ${fmtBytes(Math.max(0, this.data.free - this.data.reserve))} free.` });
+    const room = this.data ? this.data.free - this.data.reserve + ((this.data.trash && this.data.trash.size) || 0) : Infinity;   // the trash gives way
+    if (size > room) return toast("Not enough space on the memory card", { type: "err", detail: `${fmtBytes(size)} to upload, ${fmtBytes(Math.max(0, room))} free (counting the trash, which is emptied to make room).` });
     if (!this.ups.some((u) => u.state === "up" || u.state === "wait")) this.ups = [];
     const dir = this.path;
     list.forEach((x) => this.ups.push({ file: x.file, name: x.rel, dir, size: x.file.size, sent: 0, state: "wait", overwrite }));
@@ -4435,6 +4540,80 @@ const Files = {
       from.forEach((p) => this.sel.delete(p.split("/").pop()));
     } catch (e) { toastErr(e, from.length === 1 ? "Could not move it" : "Could not move them"); }
     this.load();
+  },
+  // delete = into the trash (kept a week, restorable); Undo right away from the toast
+  async remove(names) {
+    if (!names.length) return;
+    const ents = this.data ? this.data.entries.filter((x) => names.includes(x.name)) : [];
+    const dirs = ents.filter((x) => x.dir).length, files = names.length - dirs;
+    const what = names.length === 1 ? `“${names[0]}”` : `${names.length} items`;
+    const desc = names.length === 1 ? (dirs ? "The folder and everything in it go" : "The file goes")
+      : `${dirs ? `${files} file${files === 1 ? "" : "s"} and ${dirs} folder${dirs === 1 ? "" : "s"} (with everything in them)` : `${names.length} files`} go`;
+    const days = (this.trashDays || 7);
+    if (!(await confirmDialog({ title: `Delete ${what}?`, message: `${desc} to the trash. You can restore ${names.length === 1 ? "it" : "them"} for ${days} days, or sooner if the space is needed for uploads.`, confirmText: "Move to trash", danger: true }))) return;
+    try {
+      const r = await api("/api/files/delete", { method: "POST", body: { paths: names.map((n) => this.rel(n)) } });
+      names.forEach((n) => this.sel.delete(n));
+      const ids = r.ids || [];
+      toast(names.length === 1 ? `${names[0]} moved to the trash` : `${r.deleted} items moved to the trash`, {
+        detail: r.no_trash ? `${r.no_trash} on another drive ${r.no_trash === 1 ? "was" : "were"} deleted for good.` : "",
+        timeout: 8000,
+        action: ids.length ? { label: "Undo", fn: () => this.restore(ids) } : null,
+      });
+    } catch (e) { toastErr(e, names.length === 1 ? "Could not delete it" : "Could not delete them"); }
+    this.load();
+  },
+  async restore(ids) {
+    try {
+      const r = await api("/api/files/restore", { method: "POST", body: { ids } });
+      toast(r.restored === 1 ? "Restored 1 item" : `Restored ${r.restored} items`);
+    } catch (e) { toastErr(e, "Could not restore"); }
+    this.load();
+  },
+  trashDialog() {
+    let items = null, err = "", sel = new Set();
+    const m = openModal({
+      title: "Trash", iconName: "trash", wide: true,
+      body: html`<div data-tr-body></div>`,
+      foot: html`<button type="button" class="btn btn-ghost" data-tr="empty">Empty trash</button><span class="spacer"></span>
+        <button type="button" class="btn" data-tr="purge">Delete forever</button><button type="button" class="btn btn-primary" data-tr="restore">Restore</button>`,
+    });
+    const draw = () => {
+      const total = (items || []).reduce((a, x) => a + (x.size || 0), 0);
+      m.el.querySelector("[data-tr-body]").innerHTML = String(items == null ? html`<p class="faint">${err || "Loading…"}</p>`
+        : !items.length ? html`<p class="faint">The trash is empty. Files deleted on this page wait here for ${this.trashDays || 7} days.</p>`
+        : html`<p class="faint tr-note">${items.length} item${items.length === 1 ? "" : "s"}, ${fmtBytes(total)}. Deleted on this page; emptied after ${this.trashDays || 7} days, oldest first when uploads need the space. Deletes made from the PCs skip the trash.</p>
+          <ul class="tr-list">${items.map((x) => html`<li><label><input type="checkbox" class="file-check" data-tr-id="${x.id}" ${sel.has(x.id) ? raw("checked") : ""}>
+            <span class="pc-ic ${x.dir ? "is-folder" : ""}">${icon(x.dir ? "folder" : "file")}</span>
+            <span class="tr-t"><b>${x.name}</b><small class="faint">from ${x.from ? "/" + x.from : "the top folder"} · ${relTime(x.deleted)}${x.dir ? ` · ${x.count} file${x.count === 1 ? "" : "s"}` : ""}</small></span>
+            <span class="faint tnum nowrap">${fmtBytes(x.size)}</span></label></li>`)}</ul>`);
+      const has = items && items.length;
+      m.el.querySelector('[data-tr="restore"]').disabled = !sel.size;
+      m.el.querySelector('[data-tr="purge"]').disabled = !sel.size;
+      m.el.querySelector('[data-tr="empty"]').disabled = !has;
+      m.el.querySelector('[data-tr="restore"]').textContent = sel.size > 1 ? `Restore ${sel.size}` : "Restore";
+    };
+    const load = async () => {
+      try { const d = await api("/api/files/trash"); items = d.items; this.trashDays = d.days; sel = new Set([...sel].filter((i) => items.some((x) => x.id === i))); }
+      catch (e) { err = e.message; }
+      draw();
+    };
+    m.el.addEventListener("change", (e) => { const c = e.target.closest("[data-tr-id]"); if (c) { c.checked ? sel.add(c.dataset.trId) : sel.delete(c.dataset.trId); draw(); } });
+    m.el.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-tr]");
+      if (!b || b.disabled) return;
+      e.preventDefault();
+      const ids = [...sel];
+      if (b.dataset.tr === "restore") { await this.restore(ids); sel.clear(); return load(); }
+      const all = b.dataset.tr === "empty";
+      const n = all ? items.length : ids.length;
+      m.close(false);
+      if (!(await confirmDialog({ title: all ? "Empty the trash?" : `Delete ${n === 1 ? "this item" : `${n} items`} forever?`, message: `${all ? "Everything in the trash is" : n === 1 ? "It is" : "They are"} deleted from the box for good. This can't be undone.`, confirmText: all ? "Empty trash" : "Delete forever", danger: true }))) return this.trashDialog();
+      try { const r = await api("/api/files/purge", { method: "POST", body: all ? { all: true } : { ids } }); toast(`Deleted ${r.deleted} item${r.deleted === 1 ? "" : "s"} for good`, { detail: `${fmtBytes(r.freed)} freed` }); }
+      catch (err2) { toastErr(err2, "Could not delete them"); }
+      this.load();
+    });
+    draw(); load();
   },
   // a small folder browser for "Move to…"
   moveDialog(names) {
@@ -4513,26 +4692,9 @@ const Files = {
     },
     "files-sel-none"() { this.sel.clear(); this.render(); },
     "files-move-sel"() { if (this.sel.size) this.moveDialog([...this.sel]); },
-    async "files-del-sel"() {
-      const names = [...this.sel];
-      if (!names.length) return;
-      const dirs = this.data ? this.data.entries.filter((x) => x.dir && this.sel.has(x.name)).length : 0;
-      const what = names.length === 1 ? `“${names[0]}”` : `${names.length} items`;
-      if (!(await confirmDialog({ title: `Delete ${what}?`, message: `${names.length === 1 ? (dirs ? "The folder and everything in it" : "The file") : dirs ? `${names.length - dirs} file${names.length - dirs === 1 ? "" : "s"} and ${dirs} folder${dirs === 1 ? "" : "s"} (with everything in them)` : `${names.length} files`} ${names.length === 1 ? "is" : "are"} deleted from the box. This can't be undone.`, confirmText: "Delete", danger: true }))) return;
-      try {
-        const r = await api("/api/files/delete", { method: "POST", body: { paths: names.map((n) => this.rel(n)) } });
-        toast(names.length === 1 ? `Deleted ${names[0]}` : `Deleted ${r.deleted} items`);
-        this.sel.clear();
-      } catch (e) { toastErr(e, "Could not delete them"); }
-      this.load();
-    },
-    async "files-delete"(el) {
-      const name = el.dataset.name, dir = el.dataset.dir === "1";
-      if (!(await confirmDialog({ title: `Delete ${name}?`, message: dir ? "The folder and everything in it are deleted from the box. This can't be undone." : "The file is deleted from the box. This can't be undone.", confirmText: "Delete", danger: true }))) return;
-      try { await api("/api/files/delete", { method: "POST", body: { paths: [this.rel(name)] } }); toast(`Deleted ${name}`); this.sel.delete(name); }
-      catch (e) { toastErr(e, "Could not delete it"); }
-      this.load();
-    },
+    "files-del-sel"() { this.remove([...this.sel]); },
+    "files-delete"(el) { this.remove([el.dataset.name]); },
+    "files-trash"() { this.trashDialog(); },
   },
 };
 document.addEventListener("dragstart", (e) => {
@@ -4788,6 +4950,7 @@ const ACTIONS = {
     updateNowDialog(u);
   },
   "update-progress"() { updateProgressDialog(); },
+  "power-seen"() { store.set("power-dismissed", String(Math.floor(nowS()))); renderChrome(); },
   "update-seen"(el) { try { localStorage.setItem("netkey-update-seen", el.dataset.t); } catch { /* shows again */ } renderChrome(); },
   async "update-history"() {
     let d;

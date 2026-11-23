@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for a diagnostics report an admin asked for in the netkey web GUI
+Documentation=file:///opt/netkey/README.md
+
+[Path]
+PathExists=/var/lib/netkey/diag-request
+Unit=netkey-diag.service
+
+[Install]
+WantedBy=multi-user.target

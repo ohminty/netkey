@@ -1,0 +1,20 @@
+[Unit]
+Description=Write the netkey health report for the web GUI (diagnose.sh, read-only)
+Documentation=file:///opt/netkey/README.md
+
+[Service]
+Type=oneshot
+# root to read the journal, the network namespaces and the nft tables; the request file is only a signal
+ExecStart=/opt/netkey/diagnose.sh --to /var/lib/netkey/diagnostics.txt
+SyslogIdentifier=netkey-diag
+TimeoutStartSec=90
+ProtectSystem=strict
+ReadWritePaths=/var/lib/netkey
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_SYS_ADMIN
+ProtectKernelModules=yes
+ProtectClock=yes
+RestrictRealtime=yes
+LockPersonality=yes

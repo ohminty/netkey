@@ -19,6 +19,7 @@ USERS_EXPORT = "pap-users.json"     # watched by netkey-users.path (root re-rend
 USERS_SYNCED = "pap-synced.json"    # written by the root helper after pap-secrets was updated
 SETTINGS_STAMP = "settings.stamp"   # touched on settings change; the manager restarts affected lines
 SETTINGS_EXPORT = "settings.json"   # GUI overrides for root services (netkey-lan), which never open the DB
+STATS_WRITE_S = 600                 # traffic statistics wait in memory this long, then go to the SD card in one go
 PBKDF2_ITERATIONS = 60000           # ~0.5 s on a Pi 1
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"    # factory default; the GUI nags until it is changed
@@ -80,12 +81,36 @@ def write_json_atomic(path, data, mode=0o640):
     write_atomic(path, json.dumps(data, indent=1, sort_keys=True), mode)
 
 
-def read_json(path, default=None):
+READ_LIMIT = 8 * 1024 * 1024        # no state file the services share comes close
+
+
+def read_json(path, default=None, limit=READ_LIMIT):
+    """Read a JSON file the safe way for root: /var/lib/netkey belongs to the web service's user, so whatever is
+    there could be planted. Never follows a symlink (no reading /etc/shadow through it), never blocks on a FIFO or
+    device, and refuses anything that is not a regular file or is bigger than `limit`."""
     try:
-        with open(path) as f:
-            return json.load(f)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return default
+    try:
+        st = os.fstat(fd)
+        if (st.st_mode & 0o170000) != 0o100000 or st.st_size > limit:
+            return default
+        chunks, left = [], limit + 1
+        while left > 0:
+            b = os.read(fd, min(left, 1 << 20))
+            if not b:
+                break
+            chunks.append(b)
+            left -= len(b)
+        data = b"".join(chunks)
+        if len(data) > limit:
+            return default
+        return json.loads(data.decode("utf-8"))
     except (OSError, ValueError):
         return default
+    finally:
+        os.close(fd)
 
 
 class Store:
@@ -101,6 +126,11 @@ class Store:
         finally:
             os.umask(old_umask)
         self.db.row_factory = sqlite3.Row
+        # finished minutes of statistics not written yet (SD card wear: one transaction every STATS_WRITE_S instead
+        # of one a minute); the read methods below add them in, so charts are never behind
+        self.pending_stats = {}          # (ts, line) -> (present, connected, rx, tx)
+        self.pending_proto = {}          # (ts, dir, proto) -> [packets, bytes]
+        self.stats_written = time.monotonic()
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
@@ -109,6 +139,10 @@ class Store:
 
     def close(self):
         with self.lock:
+            try:
+                self.write_stats(force=True)
+            except sqlite3.Error:
+                pass
             self.db.close()
 
     def q(self, sql, args=()):
@@ -315,54 +349,99 @@ class Store:
 
     # stats
     def add_stats(self, ts, rows):
-        """rows: [(line, present, connected, rx_bytes, tx_bytes)] for one minute bucket ts."""
+        """rows: [(line, present, connected, rx_bytes, tx_bytes)] for one minute bucket ts. Kept in memory until
+        write_stats() (on its own every STATS_WRITE_S)."""
         with self.lock:
-            self.db.execute("BEGIN")
-            try:
-                self.db.executemany("INSERT OR REPLACE INTO stats(ts, line, present, connected, rx_bytes, "
-                                    "tx_bytes) VALUES(?, ?, ?, ?, ?, ?)", [(int(ts),) + tuple(r) for r in rows])
-                self.db.execute("COMMIT")
-            except BaseException:
-                self.db.execute("ROLLBACK")
-                raise
+            for r in rows:
+                self.pending_stats[(int(ts), int(r[0]))] = tuple(r[1:5])
+        self.write_stats()
 
     def add_proto_stats(self, ts, rows):
         """rows: [(dir, proto, packets, bytes)] for one minute bucket ts (retro-LAN protocol counters)."""
         with self.lock:
+            for d, proto, packets, nbytes in rows:
+                a = self.pending_proto.setdefault((int(ts), d, proto), [0, 0])
+                a[0] += packets
+                a[1] += nbytes
+        self.write_stats()
+
+    def write_stats(self, force=False):
+        """Write the waiting statistics in one transaction: when STATS_WRITE_S has passed, or now with force."""
+        with self.lock:
+            if not force and time.monotonic() - self.stats_written < STATS_WRITE_S:
+                return
+            self.stats_written = time.monotonic()
+            if not self.pending_stats and not self.pending_proto:
+                return
             self.db.execute("BEGIN")
             try:
+                self.db.executemany("INSERT OR REPLACE INTO stats(ts, line, present, connected, rx_bytes, "
+                                    "tx_bytes) VALUES(?, ?, ?, ?, ?, ?)",
+                                    [k + v for k, v in self.pending_stats.items()])
                 self.db.executemany("INSERT INTO proto_stats(ts, dir, proto, packets, bytes) VALUES(?, ?, ?, ?, ?) "
                                     "ON CONFLICT(ts, dir, proto) DO UPDATE SET packets = packets + excluded.packets, "
-                                    "bytes = bytes + excluded.bytes", [(int(ts),) + tuple(r) for r in rows])
+                                    "bytes = bytes + excluded.bytes",
+                                    [k + tuple(v) for k, v in self.pending_proto.items()])
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+            self.pending_stats, self.pending_proto = {}, {}
+
+    def _pending_proto_since(self, since):
+        return [(k, v) for k, v in list(self.pending_proto.items()) if k[0] >= int(since)]
 
     def proto_totals_since(self, since):
-        return self.q("SELECT dir, proto, SUM(packets) AS packets, SUM(bytes) AS bytes FROM proto_stats "
-                      "WHERE ts >= ? GROUP BY dir, proto", (int(since),))
+        with self.lock:
+            rows = self.q("SELECT dir, proto, SUM(packets) AS packets, SUM(bytes) AS bytes FROM proto_stats "
+                          "WHERE ts >= ? GROUP BY dir, proto", (int(since),))
+            pend = self._pending_proto_since(since)
+        out = {(r["dir"], r["proto"]): r for r in rows}
+        for (_, d, proto), (p, b) in pend:
+            r = out.setdefault((d, proto), {"dir": d, "proto": proto, "packets": 0, "bytes": 0})
+            r["packets"] = (r["packets"] or 0) + p
+            r["bytes"] = (r["bytes"] or 0) + b
+        return list(out.values())
 
     def proto_dir_series(self, since):
         """Retro-LAN bytes per minute bucket and direction ('lan' = from this box's PCs, 'party' = from the tunnels)."""
-        return self.q("SELECT ts, dir, SUM(bytes) AS bytes FROM proto_stats WHERE ts >= ? GROUP BY ts, dir",
-                      (int(since),))
+        with self.lock:
+            rows = self.q("SELECT ts, dir, SUM(bytes) AS bytes FROM proto_stats WHERE ts >= ? GROUP BY ts, dir",
+                          (int(since),))
+            pend = self._pending_proto_since(since)
+        out = {(r["ts"], r["dir"]): r for r in rows}
+        for (ts, d, _), (_, b) in pend:
+            r = out.setdefault((ts, d), {"ts": ts, "dir": d, "bytes": 0})
+            r["bytes"] = (r["bytes"] or 0) + b
+        return sorted(out.values(), key=lambda r: r["ts"])
 
     def proto_dir_bytes_since(self, since):
         out = {"lan": 0, "party": 0}
-        for r in self.q("SELECT dir, SUM(bytes) AS bytes FROM proto_stats WHERE ts >= ? GROUP BY dir", (int(since),)):
-            out[r["dir"]] = r["bytes"] or 0
+        for r in self.proto_dir_series(since):
+            out[r["dir"]] = out.get(r["dir"], 0) + (r["bytes"] or 0)
         return out
 
     def stats_since(self, since):
-        return self.q("SELECT ts, line, present, connected, rx_bytes, tx_bytes FROM stats WHERE ts >= ? "
-                      "ORDER BY ts", (int(since),))
+        with self.lock:
+            rows = self.q("SELECT ts, line, present, connected, rx_bytes, tx_bytes FROM stats WHERE ts >= ? "
+                          "ORDER BY ts", (int(since),))
+            have = {(r["ts"], r["line"]) for r in rows}
+            rows += [{"ts": ts, "line": line, "present": v[0], "connected": v[1], "rx_bytes": v[2], "tx_bytes": v[3]}
+                     for (ts, line), v in list(self.pending_stats.items()) if ts >= int(since) and (ts, line) not in have]
+        return sorted(rows, key=lambda r: r["ts"])
 
     def stats_bytes_since(self, since):
-        return self.q("SELECT COALESCE(SUM(rx_bytes), 0) AS rx, COALESCE(SUM(tx_bytes), 0) AS tx FROM stats "
-                      "WHERE ts >= ?", (int(since),))[0]
+        with self.lock:
+            r = self.q("SELECT COALESCE(SUM(rx_bytes), 0) AS rx, COALESCE(SUM(tx_bytes), 0) AS tx FROM stats "
+                       "WHERE ts >= ?", (int(since),))[0]
+            for (ts, _), v in list(self.pending_stats.items()):
+                if ts >= int(since):
+                    r["rx"] += v[2]
+                    r["tx"] += v[3]
+        return r
 
     def prune(self, keep_days):
+        self.write_stats(force=True)
         cutoff = time.time() - keep_days * 86400
         self.x("DELETE FROM stats WHERE ts < ?", (int(cutoff),))
         self.x("DELETE FROM proto_stats WHERE ts < ?", (int(cutoff),))

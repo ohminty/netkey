@@ -459,12 +459,9 @@ class CallService:
                 "busy_in_party": bool(p.get("busy_in_party", True)), "dnd": bool(p.get("dnd", False))}
 
     def load_phone(self):
-        try:
-            with open(os.path.join(self.state_dir, PHONE_FILE)) as f:
-                d = json.load(f)
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        from .store import read_json                    # root: no symlinks or FIFOs in the GUI's folder
+        d = read_json(os.path.join(self.state_dir, PHONE_FILE), {})
+        return d if isinstance(d, dict) else {}
 
     def save_phone(self, d):
         self.phone = d
@@ -472,11 +469,8 @@ class CallService:
         write_atomic(os.path.join(self.state_dir, PHONE_FILE), json.dumps(d), mode=0o644)
 
     def book_numbers(self):
-        try:
-            with open(os.path.join(self.state_dir, BOOK_FILE)) as f:
-                rows = json.load(f)
-        except (OSError, ValueError):
-            return []
+        from .store import read_json                    # written by the GUI's user, read here as root
+        rows = read_json(os.path.join(self.state_dir, BOOK_FILE), [])
         out = []
         for r in rows if isinstance(rows, list) else []:
             n = digits(r.get("number") if isinstance(r, dict) else "")

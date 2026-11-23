@@ -4,6 +4,7 @@ Runs as the netkey user (netkey-web.service, CAP_NET_BIND_SERVICE for ports 80/4
 Dev/demo:  python3 modem.py --web --demo --port 8080   (plain HTTP, simulated lines, login admin / admin)
 """
 import collections
+import errno
 import ipaddress
 import json
 import logging
@@ -24,7 +25,7 @@ from . import protostats as ps
 from . import status as st
 from .config import (MODES, SETTINGS, apply_overrides, box_name, check_setting, clean_box_name, client_ip, get_setting,
                      line_mode)
-from .store import Store, read_json, write_json_atomic
+from .store import Store, read_json, write_atomic, write_json_atomic
 
 log = logging.getLogger("netkey")
 
@@ -52,6 +53,27 @@ def web_build():
     return _WEB_BUILD
 
 
+def undervoltage_file(sys_hwmon="/sys/class/hwmon"):
+    """The Pi firmware's undervoltage alarm (1 while the supply is too weak), or None on other hardware."""
+    try:
+        for h in sorted(os.listdir(sys_hwmon)):
+            d = os.path.join(sys_hwmon, h)
+            try:
+                with open(os.path.join(d, "name")) as f:
+                    if f.read().strip() == "rpi_volt" and os.path.exists(os.path.join(d, "in0_lcrit_alarm")):
+                        return os.path.join(d, "in0_lcrit_alarm")
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return None
+
+
+def clean_file_part(text):
+    """A safe piece of a download's file name."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(text or ""))[:40].strip("-.") or "box"
+
+
 def app_version():
     try:
         with open(VERSION_FILE) as f:
@@ -59,6 +81,8 @@ def app_version():
     except OSError:
         return "dev"
 SAMPLE_S = 5
+POWER_WARN_S = 24 * 3600           # the dashboard warns about undervoltage seen this recently
+DIAG_WAIT = 60                     # seconds the GUI waits for netkey-diag.service's report
 UPLOAD_RESERVE = 200 * 1048576     # uploads leave this much free on the memory card
 UPDATE_CMD = "curl -fsSL https://raw.githubusercontent.com/ohminty/netkey/main/get.sh | sudo bash"
 UPDATE_EVERY_S = 6 * 3600          # the hub is asked about new releases this often (while the GUI is in use)
@@ -208,6 +232,10 @@ class App:
         self.state_dir = state_dir
         self.run_dir = run_dir
         self.store = store or Store(state_dir)
+        self.trash_tidied = 0.0                 # last time old trash was emptied (web.py trash_tidy)
+        self.diag_asked = 0.0                   # last diagnostics request (one at a time)
+        self.power_file = undervoltage_file()
+        self.power_seen = None                  # last time the supply was too weak (undervoltage), since start
         self.sessions = {}            # token -> expiry
         self.fails = collections.defaultdict(list)
         self.lock = threading.Lock()
@@ -686,7 +714,7 @@ class App:
         rows = read_json(os.path.join(self.state_dir, cl.BOOK_FILE), []) or []
         return [r for r in rows if isinstance(r, dict) and r.get("number")][:200]
 
-    def set_phone_book(self, rows):
+    def set_phone_book(self, rows, check_only=False):
         from . import calls as cl
         if not isinstance(rows, list) or len(rows) > 200:
             raise ValueError("the phone book holds up to 200 entries")
@@ -702,6 +730,8 @@ class App:
             seen.add(n)
             name = " ".join(str(r.get("name") or "").split())[:32]
             out.append({"name": name, "number": n})
+        if check_only:
+            return out
         write_json_atomic(os.path.join(self.state_dir, cl.BOOK_FILE), out, mode=0o644)
         return out
 
@@ -783,6 +813,8 @@ class App:
             "users_sync": self.store.users_sync_state(),
             "admin": {"username": self.store.admin_user(), "default_credentials": self.store.admin_is_default()},
             "version": app_version(), "web_build": web_build(),
+            "power": {"undervoltage_seen": self.power_seen if self.power_seen and now - self.power_seen < POWER_WARN_S
+                      else None},
             "box_name": box_name(cfg),
             "lan": self.lan_status(),
             "network": self.net_brief(),
@@ -1012,6 +1044,20 @@ class Collector(threading.Thread):
         point["rx_bps"], point["tx_bps"] = round(point["rx_bps"], 1), round(point["tx_bps"], 1)
         self.ring.append(point)
         self.sample_protocols(now)
+        self.sample_power(now)
+
+    def sample_power(self, now):
+        f = self.app.power_file
+        if not f:
+            return
+        try:
+            with open(f) as fh:
+                if fh.read().strip() == "1":
+                    if self.app.power_seen is None or now - self.app.power_seen > 3600:
+                        log.warning("power: the Pi reports undervoltage (power supply too weak; can corrupt the SD card)")
+                    self.app.power_seen = now
+        except OSError:
+            pass
 
     def sample_protocols(self, now):
         from .lan import read_status
@@ -1198,6 +1244,10 @@ def make_handler(app, secure):
                 return self.api_users(method, arg)
             if res == "files":
                 return self.api_files(method, arg, query)
+            if res == "backup" and method == "POST":
+                return self.api_backup(arg)
+            if res == "diagnostics" and method == "POST":
+                return self.api_diagnostics()
             if res == "settings":
                 if method == "GET":
                     return self.json(200, app.settings())
@@ -1372,15 +1422,140 @@ def make_handler(app, secure):
                 os.chmod(root, 0o2775)
             return os.path.realpath(root)          # fs.resolve() works with real paths
 
+        # ---- backup and restore (backup.py): both need the admin password again, like an update does
+        def api_backup(self, arg):
+            from . import backup as bk
+            from .config import check_user
+            d = self.body()
+            if not app.store.check_admin_password(str(d.get("password") or "")):
+                return self.error(403, "The admin password is not right.")
+            try:
+                if arg is None:
+                    data = bk.seal(bk.collect(app, app_version()), str(d.get("passphrase") or ""))
+                    name = f"netkey-{clean_file_part(socket.gethostname())}-{time.strftime('%Y-%m-%d')}.nkbackup"
+                    log.info("web: backup downloaded")
+                    return self.send_file_bytes(data, name)
+                if arg == "restore":
+                    payload = bk.open_sealed(str(d.get("file") or "").encode(), str(d.get("passphrase") or ""))
+                    from . import identity as ident
+                    new_secret = (payload.get("identity") or {}).get("secret")
+                    try:
+                        same = new_secret == ident.load(app.state_dir)["secret"]
+                    except (ValueError, OSError):
+                        same = False
+                    if new_secret and not same and app.party_get().get("role") not in ("standalone", "unknown"):
+                        return self.error(409, "Leave or close the LAN party first: restoring changes the box identity.")
+                    report = bk.apply(app, payload, lambda k: get_setting(app.base, k), check_setting, check_user)
+                    if report["identity"]:
+                        with app.lock:
+                            app._hub = None                       # the GUI's hub client registers again
+                        try:
+                            os.unlink(os.path.join(app.state_dir, "hub-web.json"))
+                        except OSError:
+                            pass
+                        from . import party as pt
+                        pt.queue_command(app.state_dir, "identity")
+                    log.info("web: backup restored: %s", report)
+                    return self.json(200, dict(report, ok=True))
+            except bk.BackupError as e:
+                return self.error(400, str(e))
+            return self.error(404, "not found")
+
+        # ---- diagnostics: netkey-diag.path sees the request and runs diagnose.sh as root; the report comes back here
+        def api_diagnostics(self):
+            req = os.path.join(app.state_dir, "diag-request")
+            out = os.path.join(app.state_dir, "diagnostics.txt")
+            with app.lock:
+                if time.time() - app.diag_asked < 5:
+                    return self.error(429, "A report is already being made.")
+                app.diag_asked = time.time()
+            asked = time.time()
+            try:
+                write_atomic(req, f"{asked}\n", mode=0o640)
+            except OSError as e:
+                return self.error(500, f"Could not ask for the report: {e}")
+            deadline = time.monotonic() + DIAG_WAIT
+            while time.monotonic() < deadline:
+                try:
+                    st_ = os.lstat(out)
+                except OSError:
+                    st_ = None
+                if st_ is not None and st_.st_mtime >= asked - 1 and not os.path.lexists(req):
+                    try:
+                        fd = os.open(out, os.O_RDONLY | os.O_NOFOLLOW)
+                        with os.fdopen(fd, "rb") as f:
+                            data = f.read(4 * 1024 * 1024)
+                    except OSError:
+                        data = b""
+                    if data:
+                        log.info("web: diagnostics report downloaded")
+                        name = f"netkey-diagnostics-{clean_file_part(socket.gethostname())}-{time.strftime('%Y-%m-%d-%H%M')}.txt"
+                        return self.send_file_bytes(data, name)
+                time.sleep(0.5)
+            try:
+                os.unlink(req)
+            except OSError:
+                pass
+            return self.error(504, "The box did not make the report in time. Its diagnostics service may be missing: "
+                                   "run the NetKey installer again, or run sudo /opt/netkey/diagnose.sh over SSH.")
+
+        def send_file_bytes(self, data, name):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def trash_tidy(self, root, force=False):
+            """Empty trash entries older than TRASH_DAYS; at most every 10 minutes unless forced."""
+            now = time.time()
+            if not force and now - app.trash_tidied < 600:
+                return
+            app.trash_tidied = now
+            try:
+                n, freed = fs.trash_purge(root, older_than=now - fs.TRASH_DAYS * 86400)
+                if n:
+                    log.info("web: emptied %d trash item(s) older than %d days (%d MB)", n, fs.TRASH_DAYS, freed >> 20)
+            except (OSError, ValueError) as e:
+                log.warning("web: could not tidy the trash: %s", e)
+
         def api_files(self, method, arg, query):
             root = self.share_root()
             q = lambda k, d="": (query.get(k) or [d])[0]           # noqa: E731
             try:
                 if method == "GET" and arg is None:
                     rel = "/".join(fs.rel_parts(q("path")))
+                    self.trash_tidy(root)
                     du = shutil.disk_usage(root)
+                    trash = fs.trash_list(root)
                     return self.json(200, {"path": rel, "entries": fs.listing(root, rel), "free": du.free,
-                                           "total": du.total, "reserve": UPLOAD_RESERVE})
+                                           "total": du.total, "reserve": UPLOAD_RESERVE,
+                                           "trash": {"count": len(trash), "size": sum(x["size"] or 0 for x in trash)}})
+                if method == "GET" and arg == "trash":
+                    self.trash_tidy(root, force=True)
+                    return self.json(200, {"items": fs.trash_list(root), "days": fs.TRASH_DAYS})
+                if method == "POST" and arg == "restore":
+                    ids = [str(i) for i in (self.body().get("ids") or [])]
+                    try:
+                        n = fs.trash_restore(root, ids)
+                    except FileExistsError as e:
+                        return self.error(409, f"{e}. Rename or move that one first.")
+                    log.info("web: restored %d item(s) from the trash", n)
+                    return self.json(200, {"ok": True, "restored": n})
+                if method == "POST" and arg == "purge":
+                    d = self.body()
+                    if d.get("all"):
+                        n, freed = fs.trash_purge(root, older_than=float("inf"))
+                    else:
+                        ids = [str(i) for i in (d.get("ids") or [])]
+                        for i in ids:
+                            fs.trash_entry(root, i)                       # every id checked before anything goes
+                        n, freed = fs.trash_purge(root, ids=set(ids))
+                    log.info("web: emptied %d item(s) from the trash", n)
+                    return self.json(200, {"ok": True, "deleted": n, "freed": freed})
                 if method == "GET" and arg == "download":
                     return self.download(fs.resolve(root, q("path")))
                 if method == "POST" and arg == "mkdir":
@@ -1425,8 +1600,11 @@ def make_handler(app, secure):
                         fs.move(src, dst)
                     return self.json(200, {"ok": True, "moved": len(plan)})
                 if method == "POST" and arg == "delete":
-                    n, paths = 0, []
-                    for rel in self.body().get("paths") or []:           # check them all before deleting any
+                    # into the trash (kept TRASH_DAYS days), or for good with "forever"
+                    d = self.body()
+                    forever = bool(d.get("forever"))
+                    n, skipped, paths, ids = 0, 0, [], []
+                    for rel in d.get("paths") or []:                     # check them all before deleting any
                         path = fs.resolve(root, rel)
                         if os.path.realpath(path) == os.path.realpath(root):
                             raise ValueError("the shared folder itself can't be deleted")
@@ -1434,14 +1612,23 @@ def make_handler(app, secure):
                     for path in paths:
                         if not os.path.lexists(path):
                             continue                                  # inside a folder deleted just before
+                        if not forever:
+                            try:
+                                ids.append(fs.to_trash(root, path))
+                                n += 1
+                                continue
+                            except OSError as e:
+                                if e.errno != errno.EXDEV:
+                                    raise
+                                skipped += 1                          # on another drive mounted inside: no trash
                         if os.path.isdir(path) and not os.path.islink(path):
                             shutil.rmtree(path)
                         else:
                             os.unlink(path)
                         fs.remove_fork(path)
                         n += 1
-                    log.info("web: deleted %d item(s) from the shared folder", n)
-                    return self.json(200, {"ok": True, "deleted": n})
+                    log.info("web: %s %d item(s) from the shared folder", "deleted" if forever else "trashed", n)
+                    return self.json(200, {"ok": True, "deleted": n, "trashed": not forever, "ids": ids, "no_trash": skipped})
             except FileNotFoundError:
                 return self.error(404, "That file or folder is gone (someone may have moved it from a PC).")
             except NotADirectoryError:
@@ -1493,6 +1680,11 @@ def make_handler(app, secure):
                 if not parts:
                     raise ValueError("name is missing")
                 du = shutil.disk_usage(root)
+                if n > du.free - UPLOAD_RESERVE:                      # the trash gives way first, oldest first
+                    gone, freed = fs.trash_purge(root, need=n + UPLOAD_RESERVE, free=du.free)
+                    if gone:
+                        log.info("web: emptied %d trash item(s) (%d MB) to make room for an upload", gone, freed >> 20)
+                    du = shutil.disk_usage(root)
                 if n > du.free - UPLOAD_RESERVE:
                     return refuse(507, f"Not enough space on the memory card: {du.free // 1048576} MB free.")
                 folder = fs.resolve(root, q("path"))
@@ -1644,8 +1836,9 @@ def run(base_cfg, state_dir, run_dir, port=None, demo=False):
     app.collector.stopping.set()
     try:
         app.collector.flush()
+        app.store.write_stats(force=True)           # what waited in memory (SD card wear) goes to disk now
     except Exception:
-        pass
+        log.exception("web: could not save the last statistics")
     for s in servers:
         s.shutdown()
     return 0

@@ -1471,3 +1471,20 @@ a.file-name:hover, button.file-name:hover b { text-decoration: underline; }
 .mv-list .file-name:hover:not([disabled]) { background: var(--surface-2); }
 .mv-list .file-name[disabled] { opacity: .5; cursor: not-allowed; }
 .mv-to { margin: 0; font-size: 12.5px; }
+/* toasts with an action (Undo) */
+.toast .toast-act { color: var(--accent); font: 600 13px/20px inherit; padding: 0 4px; white-space: nowrap; }
+.toast .toast-act:hover { text-decoration: underline; }
+/* fileshare: trash */
+.files-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; }
+.files-foot > span { flex: 1 1 320px; min-width: 0; }
+.tr-note { margin: 0 0 10px; font-size: 12.5px; }
+.tr-list { list-style: none; margin: 0; padding: 4px; display: grid; gap: 2px; max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.tr-list label { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; cursor: pointer; min-width: 0; }
+.tr-list label:hover { background: var(--surface-2); }
+.tr-list .tr-t { flex: 1; display: grid; min-width: 0; overflow-wrap: anywhere; }
+.tr-list .tr-t small { font-size: 12px; }
+.modal-foot .spacer { flex: 1; }
+/* settings: backup and diagnostics */
+.bk { display: grid; gap: 12px; }
+.bk p { margin: 0; font-size: 13px; }
+.bk-info:empty { display: none; }

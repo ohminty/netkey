@@ -1,13 +1,35 @@
 #!/usr/bin/env bash
 # NetKey health report (read-only: changes nothing, safe during a party). Paste its output when asking for help.
 #   sudo /opt/netkey/diagnose.sh
+#   sudo /opt/netkey/diagnose.sh --to /var/lib/netkey/diagnostics.txt   (netkey-diag.service, for the web GUI's
+#        "Download diagnostics": plain text, written atomically, readable by the netkey user)
 set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
-h() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+TO=""
+[[ "${1:-}" == "--to" && -n "${2:-}" ]] && TO=$2
+
+if [[ -n "$TO" ]]; then
+    h() { printf '\n== %s\n' "$*"; }
+else
+    h() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+fi
 line_numbers() { compgen -G '/etc/ppp/peers/netkey[0-9]*' | sed 's#.*/netkey##' | sort -n; }
 
 report() {
+    h "NetKey"
+    echo "version $(cat /opt/netkey/VERSION 2>/dev/null || echo unknown), report made $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+    h "Health"
+    uptime
+    free -m | head -2
+    df -h / /srv/netkey 2>/dev/null | awk '!seen[$0]++'
+    if command -v vcgencmd >/dev/null; then
+        t=$(vcgencmd get_throttled 2>/dev/null | sed 's/.*=//')
+        echo "throttled=$t$( [[ -n "$t" && "$t" != "0x0" ]] && echo '  (non-zero: under-voltage or overheating seen; try a better power supply)')"
+        vcgencmd measure_temp 2>/dev/null
+    fi
+
     h "System"
     . /etc/os-release; echo "$PRETTY_NAME, $(uname -m), kernel $(uname -r)"
     grep -E '^Model' /proc/cpuinfo
@@ -79,4 +101,16 @@ EOF
     for s in ModemManager brltty; do echo "$s: $(systemctl is-active $s 2>/dev/null)"; done
 }
 
-report
+if [[ -z "$TO" ]]; then
+    report
+    exit 0
+fi
+# for the web GUI: a fresh file in the same folder (mktemp: O_EXCL, never through a planted symlink), then renamed
+# over the old report; mv replaces a symlink itself, never what it points to
+dir=$(dirname "$TO")
+rm -f "$dir/diag-request"                       # the request is only a signal; nothing in it is read
+tmp=$(mktemp "$dir/.diagnostics.XXXXXX") || exit 1
+report >"$tmp" 2>&1
+chown netkey:netkey "$tmp" 2>/dev/null || true
+chmod 0640 "$tmp"
+mv -f "$tmp" "$TO"

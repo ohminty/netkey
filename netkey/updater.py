@@ -32,6 +32,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote, urlsplit
 
+from . import store
+
 log = logging.getLogger("netkey")
 
 WORK_DIR = "/var/lib/netkey-update"         # root-owned: status, history, installers, lock, the hub login
@@ -73,11 +75,7 @@ def newer(a, b):
 
 
 def read_json(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+    return store.read_json(path)            # no symlinks, regular files only, size-capped
 
 
 def write_json(path, data):

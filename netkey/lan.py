@@ -902,8 +902,10 @@ class LanDaemon:
                 continue                          # back off: three exits in two minutes
             # netatalk logs to syslog (journalctl -t afpd); its own output is only noise from an indexer it pokes
             quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if name == "afp" else {}
+            # its own process group: smbd (--no-process-group) signals its whole group when it shuts down, and in
+            # ours that SIGTERM stopped this service on every party role change
             self.share_procs[name] = subprocess.Popen(self.share_cmd(name, ftp, web), cwd="/", env=self.share_env(),
-                                                      **quiet)
+                                                      start_new_session=True, **quiet)
             log.info("lan: file sharing: %s started (pid %d)", name, self.share_procs[name].pid)
         run = {n: bool(self.share_procs.get(n) and self.share_procs[n].poll() is None)
                for n in ("smbd", "nmbd", "afp", "files")}
@@ -970,7 +972,8 @@ class LanDaemon:
             except (KeyError, PermissionError):
                 pass
             self.dnsmasq = subprocess.Popen(["ip", "netns", "exec", self.ns()] + dnsmasq_cmd(self.cfg, share,
-                                                                                               self.run_dir))
+                                                                                               self.run_dir),
+                                            start_new_session=True)      # see the file servers: own group
             self.dns_share = share
             log.info("lan: dnsmasq started (pid %d), internet sharing %s", self.dnsmasq.pid, "ON" if share else "off")
 
@@ -1549,9 +1552,14 @@ class LanDaemon:
         cmd, role = c["cmd"], self.party.role
         need = {"create": "standalone", "join": "standalone", "approve": "host", "reject": "host", "kick": "host",
                 "regenerate": "host", "close": "host", "endpoint": "host", "leave": "member", "relays": None,
-                "start": "standalone", "watch": None}
+                "start": "standalone", "watch": None, "identity": "standalone"}
         if cmd not in need:
             raise ValueError(f"unknown command {cmd}")
+        if cmd == "identity":                            # a backup was restored: register with the restored identity
+            if role != "standalone":
+                raise ValueError("leave the party first")
+            self.hub = None
+            return "Using the restored box identity"
         if cmd == "relays":
             self.start_probe(force=True)
             return "Measuring the distance to the relays"

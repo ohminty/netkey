@@ -15,7 +15,6 @@ the netkey-share group) manages the folder: uploads, folders, renames, deletes.
 """
 import argparse
 import html
-import json
 import logging
 import mimetypes
 import os
@@ -30,6 +29,8 @@ import time
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlsplit
+
+from .store import read_json
 
 log = logging.getLogger("netkey")
 
@@ -153,6 +154,146 @@ def tree_size(path):
     return total, files
 
 
+# ---- the trash: what the web page deletes waits here for TRASH_DAYS, or until the space is needed
+# A hidden folder at the top of the share: Samba vetoes dot-files, netatalk is told to (afp_conf), and the FTP and web
+# listings skip them, so the PCs never see it. One entry per deleted item: <id>/info.json and <id>/item/<name>.
+TRASH = ".netkey-trash"
+TRASH_DAYS = 7
+
+
+def trash_dir(root):
+    d = os.path.join(os.path.realpath(root), TRASH)
+    if os.path.islink(d):
+        raise ValueError("the trash folder is a symlink")
+    if not os.path.isdir(d):
+        os.mkdir(d)
+        os.chmod(d, 0o2770)
+    return d
+
+
+def item_size(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        return tree_size(path)
+    try:
+        return os.lstat(path).st_size, 1
+    except OSError:
+        return 0, 0
+
+
+def to_trash(root, path, now=None):
+    """Move one file or folder (inside root) into the trash. Same filesystem, so it is a rename: instant."""
+    from .store import write_json_atomic
+    now = time.time() if now is None else now
+    d = trash_dir(root)
+    eid = f"{int(now * 1000):013d}-{os.urandom(3).hex()}"
+    entry = os.path.join(d, eid)
+    os.mkdir(entry)
+    os.mkdir(os.path.join(entry, "item"))
+    name = os.path.basename(path)
+    size, count = item_size(path)
+    is_dir = os.path.isdir(path) and not os.path.islink(path)
+    rel = os.path.relpath(os.path.dirname(path), os.path.realpath(root))
+    try:
+        move(path, os.path.join(entry, "item", name))
+    except BaseException:
+        shutil.rmtree(entry, ignore_errors=True)
+        raise
+    write_json_atomic(os.path.join(entry, "info.json"),
+                      {"id": eid, "name": name, "from": "" if rel == "." else rel.replace(os.sep, "/"),
+                       "deleted": now, "size": size, "count": count, "dir": is_dir}, mode=0o660)
+    return eid
+
+
+def trash_entry(root, eid):
+    """(entry folder, info) for an id, checked: ids are made here, so anything else is refused."""
+    from .store import read_json
+    if not re.fullmatch(r"\d{13}-[0-9a-f]{6}", str(eid or "")):
+        raise ValueError("bad trash id")
+    entry = os.path.join(trash_dir(root), eid)
+    info = read_json(os.path.join(entry, "info.json"))
+    if not isinstance(info, dict) or not os.path.isdir(entry) or os.path.islink(entry):
+        raise FileNotFoundError(eid)
+    return entry, info
+
+
+def trash_list(root):
+    out = []
+    d = os.path.join(os.path.realpath(root), TRASH)
+    if os.path.islink(d) or not os.path.isdir(d):
+        return out                                                  # nothing deleted yet (listing never creates it)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    for eid in names:
+        try:
+            _, info = trash_entry(root, eid)
+        except (ValueError, OSError):
+            continue
+        out.append({k: info.get(k) for k in ("id", "name", "from", "deleted", "size", "count", "dir")})
+    out.sort(key=lambda x: x["deleted"] or 0, reverse=True)
+    return out
+
+
+def trash_purge(root, ids=None, older_than=None, need=0, free=None):
+    """Delete trash entries for good: the given ids, or those deleted before `older_than`, and then (oldest first) as
+    many as it takes to free `need` bytes beyond `free`. Returns (entries removed, bytes freed)."""
+    items = trash_list(root)
+    gone, freed = 0, 0
+    chosen = [x for x in items if (ids is not None and x["id"] in ids) or
+              (older_than is not None and (x["deleted"] or 0) < older_than)]
+    if need and free is not None:
+        have = free + sum(x["size"] or 0 for x in chosen)
+        for x in reversed(items):                                   # oldest first
+            if have >= need:
+                break
+            if x not in chosen:
+                chosen.append(x)
+                have += x["size"] or 0
+    for x in chosen:
+        entry = os.path.join(trash_dir(root), x["id"])
+        if os.path.isdir(entry) and not os.path.islink(entry):
+            shutil.rmtree(entry, ignore_errors=True)
+            gone += 1
+            freed += x["size"] or 0
+    return gone, freed
+
+
+def trash_restore_plan(root, ids):
+    """[(src, dst)] to put entries back where they were; raises FileExistsError naming the first clash."""
+    plan, taken = [], set()
+    for eid in ids:
+        entry, info = trash_entry(root, eid)
+        name = check_name(info.get("name"))
+        src = os.path.join(entry, "item", name)
+        if not os.path.lexists(src):
+            raise FileNotFoundError(eid)
+        parts = rel_parts(info.get("from"))
+        dst = os.path.join(os.path.realpath(root), *parts, name)
+        if os.path.lexists(dst) or dst.lower() in taken:
+            raise FileExistsError(f"{name} is already in {'/' + '/'.join(parts) if parts else 'the top folder'}")
+        taken.add(dst.lower())
+        plan.append((entry, src, parts, dst))
+    return plan
+
+
+def trash_restore(root, ids):
+    plan = trash_restore_plan(root, ids)
+    root = os.path.realpath(root)
+    for entry, src, parts, dst in plan:
+        folder = root
+        for p in parts:                                             # the folder may be gone: make it again
+            folder = os.path.join(folder, p)
+            resolve(root, os.path.relpath(folder, root), must_exist=False)
+            if not os.path.isdir(folder):
+                os.mkdir(folder)
+                os.chmod(folder, 0o2775)
+        resolve(root, os.path.relpath(folder, root))                # still inside (a symlinked folder is refused)
+        move(src, dst)
+        shutil.rmtree(entry, ignore_errors=True)
+    return len(plan)
+
+
 # ---- Samba
 def smb_conf(cfg, run_dir, iface, gateway):
     s = cfg["share"]
@@ -248,6 +389,7 @@ def afp_conf(cfg, state_dir, gateway, hostname=None):
     file perm = 0664
     directory perm = 0775
     umask = 0022
+    veto files = /{TRASH}/
 """
 
 
@@ -388,8 +530,7 @@ def ftp_server(root, address, users_path, name):
             try:
                 m = os.stat(users_path).st_mtime
                 if m != self.mtime:
-                    with open(users_path) as f:
-                        self.users = (json.load(f) or {}).get("users", {})
+                    self.users = (read_json(users_path, {}) or {}).get("users", {})
                     self.mtime = m
             except (OSError, ValueError):
                 self.users = {}

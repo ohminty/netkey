@@ -19,8 +19,20 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=20
 SyslogIdentifier=netkey-lan
-# no PrivateTmp/ProtectHome: they give the unit its own mount namespace, and the network namespaces it creates
-# (bind mounts in /run/netns) would be invisible to `ip netns exec` everywhere else (diagnose.sh, dnsmasq debugging)
+# no PrivateTmp/ProtectHome/ProtectSystem: they give the unit its own mount namespace, and the network namespaces it
+# creates (bind mounts in /run/netns) would be invisible to `ip netns exec` everywhere else (diagnose.sh, dnsmasq
+# debugging). What it can still have: it must stay root (namespaces, NICs, nft, dnsmasq, Samba, netatalk), but it
+# never loads kernel modules itself, touches raw devices or the clock, reboots, traces other programs or needs
+# exotic sockets, so a bug or a planted file can't be turned into any of that.
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_WAKE_ALARM CAP_SYS_PTRACE CAP_MKNOD CAP_SYSLOG CAP_AUDIT_CONTROL CAP_LINUX_IMMUTABLE CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_BLOCK_SUSPEND CAP_MAC_ADMIN CAP_MAC_OVERRIDE CAP_BPF CAP_PERFMON CAP_CHECKPOINT_RESTORE
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+RestrictNamespaces=net mnt
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+RestrictRealtime=yes
 
 [Install]
 WantedBy=netkey.target

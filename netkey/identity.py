@@ -98,16 +98,17 @@ def load(state_dir, machine=None):
     """{"secret", "box_id"} for this box, created on first use. ValueError if it can't be read or written."""
     path = os.path.join(state_dir, FILE)
     machine = machine_fingerprint() if machine is None else machine
+    from .store import read_json
     for _ in range(3):
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except FileNotFoundError:
+        if not os.path.lexists(path):
             data = _create(path, machine)
             if data is None:
                 continue                                  # another process won the race: read its file
-        except (OSError, ValueError) as e:
-            raise ValueError(f"cannot read the box identity ({path}): {e}") from None
+        else:
+            # root reads this too, and the folder belongs to the web service's user: no symlinks, FIFOs or huge files
+            data = read_json(path, limit=64 * 1024)
+            if data is None:
+                raise ValueError(f"cannot read the box identity ({path})")
         if not isinstance(data, dict):
             raise ValueError(f"cannot read the box identity ({path})")
         if machine and data.get("machine") and data["machine"] != machine:
@@ -119,6 +120,22 @@ def load(state_dir, machine=None):
             continue
         return {"secret": data["secret"], "box_id": box_id(data["secret"])}
     raise ValueError(f"cannot create the box identity ({path})")
+
+
+def replace(state_dir, secret, machine=None):
+    """Put a restored identity in place (backup.py), bound to this Pi. The old one is kept as .replaced."""
+    box_id(secret)                                       # ValueError if it is not a real identity
+    path = os.path.join(state_dir, FILE)
+    machine = machine_fingerprint() if machine is None else machine
+    from .store import write_json_atomic
+    if os.path.lexists(path) and not os.path.islink(path):
+        try:
+            os.replace(path, path + ".replaced")
+        except OSError:
+            pass
+    write_json_atomic(path, {"secret": secret, "machine": machine, "created": time.time(), "restored": True}, mode=0o600)
+    _chown(path)
+    log.info("netkey: box identity restored from a backup (box ID %s)", box_id(secret))
 
 
 def try_load(state_dir):
