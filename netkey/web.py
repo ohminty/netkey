@@ -1406,24 +1406,34 @@ def make_handler(app, secure):
                     to = fs.resolve(root, d.get("to"))
                     if not os.path.isdir(to):
                         raise ValueError("move to a folder")
-                    moved = 0
+                    # check every item first, so a clash halfway doesn't leave a selection half moved
+                    plan, names = [], set()
                     for rel in d.get("paths") or []:
                         src = fs.resolve(root, rel)
-                        dst = os.path.join(to, os.path.basename(src))
+                        name = os.path.basename(src)
+                        dst = os.path.join(to, name)
                         if os.path.realpath(src) == os.path.realpath(root) or \
                                 (os.path.realpath(to) + os.sep).startswith(os.path.realpath(src) + os.sep):
                             raise ValueError("a folder can't be moved into itself")
-                        if os.path.lexists(dst):
-                            return self.error(409, f"{os.path.basename(src)} is already in that folder.")
+                        if os.path.normcase(os.path.dirname(src)) == os.path.normcase(to):
+                            continue                                  # already there
+                        if os.path.lexists(dst) or name.lower() in names:
+                            return self.error(409, f"{name} is already in that folder.")
+                        names.add(name.lower())
+                        plan.append((src, dst))
+                    for src, dst in plan:
                         fs.move(src, dst)
-                        moved += 1
-                    return self.json(200, {"ok": True, "moved": moved})
+                    return self.json(200, {"ok": True, "moved": len(plan)})
                 if method == "POST" and arg == "delete":
-                    n = 0
-                    for rel in self.body().get("paths") or []:
+                    n, paths = 0, []
+                    for rel in self.body().get("paths") or []:           # check them all before deleting any
                         path = fs.resolve(root, rel)
                         if os.path.realpath(path) == os.path.realpath(root):
                             raise ValueError("the shared folder itself can't be deleted")
+                        paths.append(path)
+                    for path in paths:
+                        if not os.path.lexists(path):
+                            continue                                  # inside a folder deleted just before
                         if os.path.isdir(path) and not os.path.islink(path):
                             shutil.rmtree(path)
                         else:

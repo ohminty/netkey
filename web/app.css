@@ -1458,3 +1458,16 @@ a.file-name:hover, button.file-name:hover b { text-decoration: underline; }
   .banner > span { flex: 1 1 200px; min-width: 0; }
   .banner > .btn { margin-left: auto; }
 }
+/* fileshare: selecting several files */
+.files-table .sel-col { width: 34px; padding-right: 0; }
+.file-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; vertical-align: middle; margin: 0; }
+.files-table tr.is-sel td { background: var(--accent-soft); }
+.files-table tbody tr[data-name] { user-select: none; }
+.sel-count { font-size: 13px; color: var(--text-2); white-space: nowrap; }
+.drag-ghost { position: fixed; top: -100px; left: -100px; padding: 6px 12px; border-radius: 8px; background: var(--accent); color: #fff; font: 600 13px/1.2 system-ui, sans-serif; }
+.mv { display: grid; gap: 10px; }
+.mv-list { list-style: none; margin: 0; padding: 4px; display: grid; gap: 2px; max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.mv-list .file-name { width: 100%; padding: 8px 10px; border-radius: 6px; }
+.mv-list .file-name:hover:not([disabled]) { background: var(--surface-2); }
+.mv-list .file-name[disabled] { opacity: .5; cursor: not-allowed; }
+.mv-to { margin: 0; font-size: 12.5px; }

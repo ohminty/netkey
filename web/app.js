@@ -4223,12 +4223,37 @@ const Files = {
     this.path = this.path || "";
     this.data = null; this.err = null;
     this.ups = []; this.drag = 0;
+    this.sel = new Set(); this.anchor = null;
     this.render();
     this.load();
     this.onDrag = (e) => this.dragEvent(e);
     ["dragenter", "dragover", "dragleave", "drop"].forEach((t) => document.addEventListener(t, this.onDrag));
+    this.onKey = (e) => this.keyEvent(e);
+    document.addEventListener("keydown", this.onKey);
   },
-  unmount() { clearTimeout(this.timer); ["dragenter", "dragover", "dragleave", "drop"].forEach((t) => document.removeEventListener(t, this.onDrag)); },
+  unmount() {
+    clearTimeout(this.timer);
+    ["dragenter", "dragover", "dragleave", "drop"].forEach((t) => document.removeEventListener(t, this.onDrag));
+    document.removeEventListener("keydown", this.onKey);
+  },
+  // selection: names in the current folder (checkboxes, click on a row, shift for a range, Ctrl/Cmd+A, Esc)
+  names() { return this.data ? this.data.entries.map((e) => e.name) : []; },
+  select(names, on) { names.forEach((n) => (on ? this.sel.add(n) : this.sel.delete(n))); this.render(); },
+  pick(name, e, want = !this.sel.has(name)) {
+    const all = this.names();
+    if (e && e.shiftKey && this.anchor != null && all.includes(this.anchor)) {      // a range, from the last row picked
+      const [a, b] = [all.indexOf(this.anchor), all.indexOf(name)].sort((x, y) => x - y);
+      return this.select(all.slice(a, b + 1), want);
+    }
+    this.anchor = name;
+    this.select([name], want);
+  },
+  keyEvent(e) {
+    if (current !== this || modals.length || e.defaultPrevented || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !document.activeElement.classList.contains("file-check")) return;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a" && this.data && this.data.entries.length) { e.preventDefault(); this.select(this.names(), true); }
+    else if (e.key === "Escape" && this.sel.size) { e.preventDefault(); this.sel.clear(); this.render(); }
+    else if ((e.key === "Delete" || e.key === "Backspace") && this.sel.size) { e.preventDefault(); this.actions["files-del-sel"].call(this); }
+  },
   update() { this.render(); },
   onVisible() { this.load(); },
   async load() {
@@ -4238,6 +4263,8 @@ const Files = {
       const d = await api(`/api/files?path=${encodeURIComponent(want)}`);
       if (want !== this.path) return;
       this.data = d; this.err = null;
+      const have = new Set(d.entries.map((x) => x.name));
+      [...this.sel].forEach((n) => { if (!have.has(n)) this.sel.delete(n); });     // gone (moved or deleted elsewhere)
     } catch (e) {
       if (e.status === 401) return;
       if (e.status === 404 && this.path) { this.path = ""; return this.load(); }
@@ -4247,7 +4274,7 @@ const Files = {
     this.render();
     this.timer = setTimeout(() => { if (!document.hidden && !this.ups.some((u) => u.state === "up")) this.load(); else this.timer = setTimeout(() => this.load(), 5000); }, 5000);
   },
-  go(path) { this.path = path; this.data = null; this.render(); this.load(); },
+  go(path) { this.path = path; this.data = null; this.sel.clear(); this.anchor = null; this.render(); this.load(); },
   rel(name) { return this.path ? `${this.path}/${name}` : name; },
   services(fsx) {
     return html`<section class="share-svcs" aria-label="How the PCs get the files">${Object.entries(SHARE_SVC).map(([k, s]) => {
@@ -4287,7 +4314,9 @@ const Files = {
     const free = d ? Math.max(0, d.free - d.reserve) : null;
     const row = (e) => {
       const rel = this.rel(e.name);
-      return html`<tr data-key="f-${e.name}" draggable="true" data-drag="${rel}" ${e.dir ? html`data-drop-dir="${rel}"` : ""} class="${e.dir ? "is-dir" : ""}">
+      const on = this.sel.has(e.name);
+      return html`<tr data-key="f-${e.name}" draggable="true" data-drag="${rel}" data-name="${e.name}" data-action="files-row" ${e.dir ? html`data-drop-dir="${rel}"` : ""} class="${e.dir ? "is-dir" : ""} ${on ? "is-sel" : ""}">
+        <td class="sel-col"><input type="checkbox" class="file-check" data-action="files-check" data-name="${e.name}" ${on ? raw("checked") : ""} aria-label="Select ${e.name}"></td>
         <td><div class="cell-user">${e.dir ? html`<button type="button" class="file-name" data-action="files-go" data-path="${rel}"><span class="pc-ic is-folder">${icon("folder")}</span><b>${e.name}</b></button>`
           : html`<a class="file-name" href="/api/files/download?path=${encodeURIComponent(rel)}" download><span class="pc-ic">${icon("file")}</span><span>${e.name}</span></a>`}</div></td>
         <td class="r nowrap tnum hide-sm">${e.dir ? "" : fmtBytes(e.size)}</td>
@@ -4304,25 +4333,29 @@ const Files = {
       ${this.uploadsCard()}
       <section class="card files-card ${this.drag ? "is-drop" : ""}" data-key="files">
         <div class="card-head files-head">${this.crumbs()}<span class="spacer"></span>
-          <button type="button" class="btn btn-sm" data-action="files-mkdir">${icon("plus")}New folder</button>
+          ${this.sel.size ? html`<span class="sel-count" data-key="selbar"><b>${this.sel.size}</b> selected</span>
+            <button type="button" class="btn btn-sm" data-action="files-move-sel">${icon("folder")}Move to…</button>
+            <button type="button" class="btn btn-sm btn-danger" data-action="files-del-sel">${icon("trash")}Delete</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="files-sel-none">Clear</button>`
+          : html`<button type="button" class="btn btn-sm" data-action="files-mkdir" data-key="mk">${icon("plus")}New folder</button>
           <label class="btn btn-sm">${icon("folder")}Upload folder<input type="file" class="sr-only" data-change="files-pick" webkitdirectory multiple></label>
-          <label class="btn btn-primary btn-sm">${icon("up")}Upload files<input type="file" class="sr-only" data-change="files-pick" multiple></label></div>
+          <label class="btn btn-primary btn-sm">${icon("up")}Upload files<input type="file" class="sr-only" data-change="files-pick" multiple></label>`}</div>
         ${d == null ? (this.err ? emptyState("alert", "Could not open the shared folder", this.err, html`<button class="btn" data-action="files-reload">Retry</button>`) : html`<table class="table"><tbody>${skelRows(3, 4)}</tbody></table>`)
           : !d.entries.length ? emptyState("folder", this.path ? "This folder is empty" : "Nothing shared yet", "Drag files or whole folders here, or use Upload. The PCs on the retro LAN can get them right away.")
-          : html`<div class="table-wrap"><table class="table files-table"><thead><tr><th>Name</th><th class="r hide-sm">Size</th><th class="hide-sm">Modified</th><th class="r"><span class="sr-only">Actions</span></th></tr></thead>
-              <tbody>${this.path ? html`<tr data-key="f-up" data-drop-dir="${this.path.split("/").slice(0, -1).join("/")}"><td colspan="4"><button type="button" class="file-name" data-action="files-go" data-path="${this.path.split("/").slice(0, -1).join("/")}"><span class="pc-ic is-folder">${icon("folder")}</span><span class="muted">..  (up one folder)</span></button></td></tr>` : ""}${d.entries.map(row)}</tbody></table></div>`}
+          : html`<div class="table-wrap"><table class="table files-table"><thead><tr><th class="sel-col"><input type="checkbox" class="file-check" data-action="files-check-all" ${d.entries.length && this.sel.size === d.entries.length ? raw("checked") : ""} aria-label="Select all"></th><th>Name</th><th class="r hide-sm">Size</th><th class="hide-sm">Modified</th><th class="r"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody>${this.path ? html`<tr data-key="f-up" data-drop-dir="${this.path.split("/").slice(0, -1).join("/")}"><td></td><td colspan="4"><button type="button" class="file-name" data-action="files-go" data-path="${this.path.split("/").slice(0, -1).join("/")}"><span class="pc-ic is-folder">${icon("folder")}</span><span class="muted">..  (up one folder)</span></button></td></tr>` : ""}${d.entries.map(row)}</tbody></table></div>`}
         <div class="drop-hint" aria-hidden="true">${icon("up")}<b>Drop to upload into ${this.path ? `/${this.path}` : "the shared folder"}</b></div>
-        ${d ? html`<p class="card-note">${icon("database", "i-sm")}${fmtBytes(free)} free for uploads on the memory card · drag a row onto a folder to move it</p>` : ""}
+        ${d ? html`<p class="card-note" data-key="fnote">${icon("database", "i-sm")}${fmtBytes(free)} free for uploads on the memory card · tick rows (or Shift-click a range) to move or delete several at once · drag rows onto a folder to move them</p>` : ""}
       </section>
     </div>`);
   },
-  // drag and drop: files from the computer upload; a row dragged onto a folder (or a breadcrumb) moves
+  // drag and drop: files from the computer upload; rows dragged onto a folder (or a breadcrumb) move
   dragEvent(e) {
     const files = e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
     const target = e.target.closest && e.target.closest("[data-drop-dir]");
     if (!files) {
       if (!this.dragRow) return;
-      if (e.type === "dragover" && target && target.dataset.dropDir !== this.dragRow) { e.preventDefault(); $$(".drop-on", view).forEach((x) => x !== target && x.classList.remove("drop-on")); target.classList.add("drop-on"); }
+      if (e.type === "dragover" && target && !this.dragRow.includes(target.dataset.dropDir)) { e.preventDefault(); $$(".drop-on", view).forEach((x) => x !== target && x.classList.remove("drop-on")); target.classList.add("drop-on"); }
       if (e.type === "dragleave" && target) target.classList.remove("drop-on");
       if (e.type === "drop" && target) { e.preventDefault(); const from = this.dragRow; this.dragRow = null; this.move(from, target.dataset.dropDir); }
       return;
@@ -4395,12 +4428,46 @@ const Files = {
   },
   after() { if (current === this) this.render(); this.pump(); },
   async move(from, to) {
-    if (from == null || to == null) return;
+    if (!from || !from.length || to == null) return;
     try {
-      await api("/api/files/move", { method: "POST", body: { paths: [from], to } });
-      toast(`Moved ${from.split("/").pop()}`, { detail: `to ${to ? "/" + to : "the top folder"}` });
-    } catch (e) { toastErr(e, "Could not move it"); }
+      const r = await api("/api/files/move", { method: "POST", body: { paths: from, to } });
+      if (r.moved) toast(from.length === 1 ? `Moved ${from[0].split("/").pop()}` : `Moved ${r.moved} items`, { detail: `to ${to ? "/" + to : "the top folder"}` });
+      from.forEach((p) => this.sel.delete(p.split("/").pop()));
+    } catch (e) { toastErr(e, from.length === 1 ? "Could not move it" : "Could not move them"); }
     this.load();
+  },
+  // a small folder browser for "Move to…"
+  moveDialog(names) {
+    const moving = names.map((n) => this.rel(n));
+    let at = this.path, dirs = null, err = "";
+    const m = openModal({
+      title: `Move ${names.length === 1 ? names[0] : `${names.length} items`}`, iconName: "folder",
+      body: html`<div class="mv" data-mv-body></div>`,
+      foot: html`<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn btn-primary" data-mv-go>Move here</button>`,
+      onSubmit: async () => {
+        if (at === this.path) { toast("They are already in this folder"); return false; }
+        await this.move(moving, at);
+      },
+    });
+    const draw = () => {
+      const parts = at ? at.split("/") : [];
+      const crumbs = [html`<button type="button" class="crumb" data-mv="">${icon("home", "i-sm")}Files</button>`];
+      parts.forEach((p, i) => { crumbs.push(html`<span class="crumb-sep">/</span>`); crumbs.push(html`<button type="button" class="crumb ${i === parts.length - 1 ? "is-here" : ""}" data-mv="${parts.slice(0, i + 1).join("/")}">${p}</button>`); });
+      const list = dirs == null ? html`<p class="faint">${err || "Loading…"}</p>`
+        : !dirs.length ? html`<p class="faint">No folders in here. Choose <b>Move here</b> to move into this folder.</p>`
+        : html`<ul class="mv-list">${dirs.map((dn) => { const to = at ? `${at}/${dn}` : dn, off = moving.includes(to);
+            return html`<li><button type="button" class="file-name" data-mv="${to}" ${off ? raw("disabled") : ""}><span class="pc-ic is-folder">${icon("folder")}</span><span>${dn}</span>${off ? html`<span class="faint"> (being moved)</span>` : ""}</button></li>`; })}</ul>`;
+      m.el.querySelector("[data-mv-body]").innerHTML = String(html`<nav class="crumbs">${crumbs}</nav>${list}
+        <p class="faint mv-to">Moves to <b>${at ? "/" + at : "the top folder"}</b>${at === this.path ? " (where they are now)" : ""}</p>`);
+    };
+    const open = async (path) => {
+      at = path; dirs = null; err = ""; draw();
+      try { const d = await api(`/api/files?path=${encodeURIComponent(path)}`); if (at === path) dirs = d.entries.filter((x) => x.dir).map((x) => x.name); }
+      catch (e) { err = e.message; }
+      if (at === path) draw();
+    };
+    m.el.addEventListener("click", (e) => { const b = e.target.closest("[data-mv]"); if (b && !b.disabled) { e.preventDefault(); open(b.dataset.mv); } });
+    open(at);
   },
   actions: {
     "files-go"(el) { this.go(el.dataset.path || ""); },
@@ -4438,10 +4505,31 @@ const Files = {
         },
       });
     },
+    "files-check"(el, e) { this.pick(el.dataset.name, e, el.checked); },
+    "files-check-all"(el) { if (el.checked) this.select(this.names(), true); else { this.sel.clear(); this.render(); } },
+    "files-row"(el, e) {
+      if (e.target.closest("a, button, input, label")) return;          // the name, download, rename and delete keep their job
+      this.pick(el.dataset.name, e);
+    },
+    "files-sel-none"() { this.sel.clear(); this.render(); },
+    "files-move-sel"() { if (this.sel.size) this.moveDialog([...this.sel]); },
+    async "files-del-sel"() {
+      const names = [...this.sel];
+      if (!names.length) return;
+      const dirs = this.data ? this.data.entries.filter((x) => x.dir && this.sel.has(x.name)).length : 0;
+      const what = names.length === 1 ? `“${names[0]}”` : `${names.length} items`;
+      if (!(await confirmDialog({ title: `Delete ${what}?`, message: `${names.length === 1 ? (dirs ? "The folder and everything in it" : "The file") : dirs ? `${names.length - dirs} file${names.length - dirs === 1 ? "" : "s"} and ${dirs} folder${dirs === 1 ? "" : "s"} (with everything in them)` : `${names.length} files`} ${names.length === 1 ? "is" : "are"} deleted from the box. This can't be undone.`, confirmText: "Delete", danger: true }))) return;
+      try {
+        const r = await api("/api/files/delete", { method: "POST", body: { paths: names.map((n) => this.rel(n)) } });
+        toast(names.length === 1 ? `Deleted ${names[0]}` : `Deleted ${r.deleted} items`);
+        this.sel.clear();
+      } catch (e) { toastErr(e, "Could not delete them"); }
+      this.load();
+    },
     async "files-delete"(el) {
       const name = el.dataset.name, dir = el.dataset.dir === "1";
       if (!(await confirmDialog({ title: `Delete ${name}?`, message: dir ? "The folder and everything in it are deleted from the box. This can't be undone." : "The file is deleted from the box. This can't be undone.", confirmText: "Delete", danger: true }))) return;
-      try { await api("/api/files/delete", { method: "POST", body: { paths: [this.rel(name)] } }); toast(`Deleted ${name}`); }
+      try { await api("/api/files/delete", { method: "POST", body: { paths: [this.rel(name)] } }); toast(`Deleted ${name}`); this.sel.delete(name); }
       catch (e) { toastErr(e, "Could not delete it"); }
       this.load();
     },
@@ -4450,9 +4538,18 @@ const Files = {
 document.addEventListener("dragstart", (e) => {
   const tr = e.target.closest && e.target.closest("[data-drag]");
   if (!tr || current !== Files) return;
-  Files.dragRow = tr.dataset.drag;
+  // a selected row drags the whole selection; an unselected one drags just itself
+  Files.dragRow = Files.sel.has(tr.dataset.name) ? [...Files.sel].map((n) => Files.rel(n)) : [tr.dataset.drag];
   e.dataTransfer.effectAllowed = "move";
-  e.dataTransfer.setData("text/plain", tr.dataset.drag);
+  e.dataTransfer.setData("text/plain", Files.dragRow.join("\n"));
+  if (Files.dragRow.length > 1) {
+    const g = document.createElement("div");
+    g.className = "drag-ghost";
+    g.textContent = `${Files.dragRow.length} items`;
+    document.body.appendChild(g);
+    e.dataTransfer.setDragImage(g, 12, 12);
+    setTimeout(() => g.remove(), 0);
+  }
 });
 document.addEventListener("dragend", () => { Files.dragRow = null; $$(".drop-on", view).forEach((x) => x.classList.remove("drop-on")); });
 
