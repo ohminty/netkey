@@ -340,7 +340,7 @@ class App:
     party_timeout = 25
     PARTY_CMDS = {"create": "endpoint", "join": "code", "approve": "member", "reject": "member", "kick": "member",
                   "regenerate": None, "endpoint": "endpoint", "leave": None, "close": None, "relays": None,
-                  "start": "listing", "watch": "listing"}
+                  "start": "listing", "watch": "listing", "share_files": None}
 
     def party_get(self):
         from . import lan
@@ -374,6 +374,8 @@ class App:
         if cmd == "watch":
             kw.update(starts=float(data.get("starts") or 0), title=str(data.get("title") or "")[:40],
                       on=bool(data.get("on", True)))
+        if cmd == "share_files":
+            kw["on"] = data.get("on") is True
         cid = pt.queue_command(self.state_dir, cmd, **kw)
         result = pt.wait_result(lan.RUN_DIR, cid, timeout=self.party_timeout)
         if result is None:

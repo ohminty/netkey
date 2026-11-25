@@ -176,8 +176,9 @@ def tunnel_input_rules(cfg, role, member_ids, ctrl_ids=None):
     return []
 
 
-def guard_ruleset(cfg, gateway, member_ids, role):
-    """Bridge-family guards inside the party namespace. Host: everything arriving from member ports."""
+def guard_ruleset(cfg, gateway, member_ids, role, share_files=False):
+    """Bridge-family guards inside the party namespace. Host: everything arriving from member ports. share_files: the
+    host shares its file servers with the party PCs (a private party's opt-in; never for a public one)."""
     lan = cfg["lan"]
     lines = ["table bridge netkey_guard", "delete table bridge netkey_guard", "table bridge netkey_guard {"]
     if role == "host":
@@ -203,20 +204,24 @@ def guard_ruleset(cfg, gateway, member_ids, role):
                       f'        iifname "{vx_name(m)}" add @macs_m{m} {{ ether saddr }} return',
                       f'        iifname "{vx_name(m)}" counter drop']
     # the host's file share is for its own retro LAN: PCs of other boxes in the party can't reach it, and its
-    # Network Neighborhood announcements stay home (NetBIOS between the party PCs themselves still flows)
+    # Network Neighborhood announcements stay home (NetBIOS between the party PCs themselves still flows), unless
+    # the host shares its files with the party
     from .fileshare import PASV_PORTS, TCP_PORTS, UDP_PORTS
     tcp = ", ".join(map(str, TCP_PORTS)) + f", {PASV_PORTS[0]}-{PASV_PORTS[1]}"
     udp = ", ".join(map(str, UDP_PORTS))
+    closed = not (share_files and role == "host")
     lines += ["    }",
               "    chain forward {", "        type filter hook forward priority filter; policy accept;",
               "        jump guard", "    }",
-              "    chain input {", "        type filter hook input priority filter; policy accept;",
-              f'        iifname "vx-*" tcp dport {{ {tcp} }} counter drop',
-              f'        iifname "vx-*" udp dport {{ {udp} }} counter drop',
-              "        jump guard", "    }",
-              "    chain output {", "        type filter hook output priority filter; policy accept;",
-              f'        oifname "vx-*" ip saddr {gateway} udp sport {{ {udp} }} counter drop',
-              "    }", "}"]
+              "    chain input {", "        type filter hook input priority filter; policy accept;"]
+    if closed:
+        lines += [f'        iifname "vx-*" tcp dport {{ {tcp} }} counter drop',
+                  f'        iifname "vx-*" udp dport {{ {udp} }} counter drop']
+    lines += ["        jump guard", "    }",
+              "    chain output {", "        type filter hook output priority filter; policy accept;"]
+    if closed:
+        lines.append(f'        oifname "vx-*" ip saddr {gateway} udp sport {{ {udp} }} counter drop')
+    lines += ["    }", "}"]
     return "\n".join(lines) + "\n"
 
 

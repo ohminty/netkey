@@ -185,6 +185,21 @@ table inet netkey_lan {{
 """
 
 
+def host_files(view):
+    """(name, share, address) when the party host says it shares its files with the party, else None. The view comes
+    from another box: only plain NetBIOS/share names and an IPv4 address are taken."""
+    v = view if isinstance(view, dict) else {}
+    name, share, addr = (str(v.get(k) or "") for k in ("files_name", "files_share", "files_address"))
+    if not v.get("share_files") or not re.fullmatch(r"[A-Za-z0-9_-]{1,15}", name) or \
+            not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", share or "FILES"):
+        return None
+    try:
+        ipaddress.IPv4Address(addr)
+    except ValueError:
+        return None
+    return name, share or "FILES", addr
+
+
 def ns_ruleset(cfg, share, tunnel_rules=(), role="standalone"):
     """nft table inside the party namespace (default drop; IPv6 is disabled there as well).
     Members have no gateway: nothing is routed, they only bridge the retro port into the tunnel."""
@@ -468,8 +483,8 @@ class LanDaemon:
         self.built = (role, share)
         self.rules_sig = None
 
-    def ensure_rules(self, role, share, member_ids, ctrl_ids=None):
-        sig = (role, share, tuple(member_ids), tuple(ctrl_ids or ()))
+    def ensure_rules(self, role, share, member_ids, ctrl_ids=None, files=False):
+        sig = (role, share, tuple(member_ids), tuple(ctrl_ids or ()), files)
         if sig == self.rules_sig:
             return
         if role != "member":
@@ -477,7 +492,7 @@ class LanDaemon:
         self.nsrun("nft", "-f", "-", input_text=ns_ruleset(self.cfg, share, pt.tunnel_input_rules(
             self.cfg, role, member_ids, ctrl_ids), role))
         self.nsrun("nft", "-f", "-", input_text=pt.guard_ruleset(self.cfg, addresses(self.cfg)["gateway"],
-                                                                  member_ids, role))
+                                                                  member_ids, role, files))
         self.rules_sig = sig
 
     # the retro NIC: adoption and leak quarantine
@@ -826,8 +841,10 @@ class LanDaemon:
     def ensure_fileshare(self, role):
         s, a = self.cfg["share"], addresses(self.cfg)
         if role == "member":
+            f = host_files(self.host_rt.get("view"))
+            host = f" The host shares its files with the party: \\\\{f[0]}\\{f[1]} (or {f[2]})." if f else ""
             return self.share_paused("This box is in someone else's party, so its PCs are on the host's network. "
-                                     "File sharing is back when the party ends.")
+                                     f"File sharing is back when the party ends.{host}")
         want, errors = [], {}
         try:
             import pwd
@@ -1184,8 +1201,17 @@ class LanDaemon:
         log.info("lan: %s joined as member %d", p["name"], free)
         return str(free)
 
+    @staticmethod
+    def files_shared(d):
+        """The host shares its file servers with the party PCs: its opt-in, never in a public party."""
+        return d.get("role") == "host" and bool(d.get("share_files")) and not d.get("public")
+
     def party_view(self, d):
+        files = self.files_shared(d) and self.share_status.get("active")
         return {"name": d["name"], "share_internet": bool(self.cfg["lan"]["share_internet"]),
+                "share_files": bool(files), "files_name": self.share_status.get("name") if files else None,
+                "files_share": self.share_status.get("share") if files else None,
+                "files_address": self.share_status.get("address") if files else None,
                 "members": [{"id": int(k), "name": m["name"]} for k, m in sorted(d["members"].items(),
                                                                                  key=lambda kv: int(kv[0]))
                             if not m.get("kicked_at")]}
@@ -1552,7 +1578,7 @@ class LanDaemon:
         cmd, role = c["cmd"], self.party.role
         need = {"create": "standalone", "join": "standalone", "approve": "host", "reject": "host", "kick": "host",
                 "regenerate": "host", "close": "host", "endpoint": "host", "leave": "member", "relays": None,
-                "start": "standalone", "watch": None, "identity": "standalone"}
+                "start": "standalone", "watch": None, "identity": "standalone", "share_files": "host"}
         if cmd not in need:
             raise ValueError(f"unknown command {cmd}")
         if cmd == "identity":                            # a backup was restored: register with the restored identity
@@ -1725,6 +1751,14 @@ class LanDaemon:
                 d["join_priv"], d["join_pub"] = pt.wg_genkey()
                 self.party.save()
                 return "New invite code created; the old code no longer works"
+            if cmd == "share_files":
+                on = bool(c.get("on"))
+                if on and d.get("public"):
+                    raise ValueError("A public party never gets your files: everyone in it is a stranger")
+                d["share_files"] = on
+                self.party.save()
+                return ("The party PCs can now use this box's file share, like your own PCs" if on
+                        else "Your file share is for your own retro LAN again")
             if cmd == "endpoint" and d.get("via") == "hub":
                 raise ValueError("This party runs through the cloud hub; members need no address")
             if cmd == "endpoint":
@@ -1921,6 +1955,8 @@ class LanDaemon:
             a = self.agent
             out["hub"] = {"url": self.cfg["lan"]["hub_url"], "online": bool(a and a.online),
                           "error": a.error if a else None, "last_ok": a.last_ok if a else None}
+        if role == "host":
+            out["share_files"] = self.files_shared(d)
         out["relay_probe"] = dict(self.relay_probe or {}, error=self.relay_probe_error,
                                   running=bool(self.prober and self.prober.is_alive()))
         cfg, now = self.cfg, time.time()
@@ -1959,6 +1995,7 @@ class LanDaemon:
                        member_id=d.get("id"), party_name=d.get("party_name"), error=rt.get("error"),
                        unreachable_since=rt.get("unreachable_since"), rtt_ms=rt.get("rtt"),
                        handshake_age=int(now - hs) if hs else None, view=rt.get("view"),
+                       host_files=host_files(rt.get("view")),
                        verify=hc.verify_words(d["pub"]) if d.get("pub") else None)
         return out
 
@@ -2086,7 +2123,8 @@ class LanDaemon:
             if frozenset(member_ids) - self.last_members:
                 self.schedule_garp()                           # a member's PCs still know their own box as gateway
             self.last_members = frozenset(member_ids)
-            self.ensure_rules(role, share, member_ids, self.ctrl_ids if role == "host" else None)
+            self.ensure_rules(role, share, member_ids, self.ctrl_ids if role == "host" else None,
+                              self.files_shared(self.party.data))
             if role != "member":
                 self.ensure_dnsmasq(share)
             links = self.ns_links()

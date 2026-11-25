@@ -242,11 +242,12 @@ class CallClient:
         self.pushes.clear()
         return out
 
-    def update(self, ready, baud, force=False):
-        """Tell the service whether this line can take a call (sent on change and every 30 s)."""
-        state = (bool(ready), int(baud))
+    def update(self, ready, baud, force=False, busy=False):
+        """Tell the service whether this line can take a call (sent on change and every 30 s). busy: the line is in
+        a call of its own (a dial-up session through pppd), so callers hear BUSY rather than "no line"."""
+        state = (bool(ready), int(baud), bool(busy))
         if force or state != self.sent_state or time.monotonic() - self.sent_at > 30:
-            if self.send(op="hello", line=self.line, ready=state[0], baud=state[1]):
+            if self.send(op="hello", line=self.line, ready=state[0], baud=state[1], busy=state[2]):
                 self.sent_state, self.sent_at = state, time.monotonic()
 
     def request(self, op, want, timeout, abort=None, **kw):
@@ -655,7 +656,7 @@ class CallService:
                 except (TypeError, ValueError):
                     baud = 0
                 self.lines[line] = {"conn": conn, "ready": bool(msg.get("ready")), "baud": baud,
-                                    "seen": time.monotonic()}
+                                    "busy": bool(msg.get("busy")), "seen": time.monotonic()}
                 self.conns[conn] = line
             return line
         if op == "dial":
@@ -686,6 +687,8 @@ class CallService:
         return sorted(ln for ln, i in self.lines.items() if i["ready"] and ln not in busy and ln not in exclude)
 
     def line_busy(self, line):
+        if (self.lines.get(line) or {}).get("busy"):
+            return True                      # in a dial-up call of its own
         return any(line in (c.caller_line, c.answered_line) or line in c.ring_lines for c in self.calls.values())
 
     def new_call(self, kind, caller_line=None, cid=None):

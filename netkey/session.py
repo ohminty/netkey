@@ -25,6 +25,9 @@ SLOW_LADDER = [9600, 2400, 1200]
 FAST_LADDER = [115200, 57600, 38400, 19200]
 DTR_DEBOUNCE_S = 0.2
 AUTOBAUD_IDLE_RESET_S = 3.0
+# a speed the PC sent understood commands at is kept this long: Windows 95's modem detection waits about 5 s between
+# retries, and an idle reset in between made every retry arrive at the wrong speed (and be thrown away) for a minute
+AUTOBAUD_HOLD_S = 60.0
 HEARTBEAT_S = 10.0          # idle status refresh (the GUI treats > status.STALE_S as a dead worker)
 CALL_STATUS_S = 2.0         # status refresh with traffic counters during a call
 DCD_DEBOUNCE_S = 0.5
@@ -40,6 +43,18 @@ def looks_valid(data):
     return printable * 2 >= len(data)
 
 
+def recent_baud(now, confirmed_baud, confirmed_at):
+    """The speed the PC sent understood commands at within AUTOBAUD_HOLD_S, else None."""
+    return confirmed_baud if confirmed_at is not None and now - confirmed_at < AUTOBAUD_HOLD_S else None
+
+
+def idle_reset_due(now, last_rx, baud, confirmed_baud, confirmed_at):
+    """Go back to the configured speed after a quiet spell, unless the PC recently talked at this speed."""
+    if now - last_rx <= AUTOBAUD_IDLE_RESET_S:
+        return False
+    return recent_baud(now, confirmed_baud, confirmed_at) != baud
+
+
 def next_baud(baud, burst_len, fast_mode):
     """Pick the next speed after a garbage burst. Returns (baud, fast_mode)."""
     if burst_len > 12:
@@ -48,7 +63,7 @@ def next_baud(baud, burst_len, fast_mode):
             return SLOW_LADDER[0], False
         i = SLOW_LADDER.index(baud) if baud in SLOW_LADDER else -1
         return SLOW_LADDER[(i + 1) % len(SLOW_LADDER)], False
-    if not fast_mode:
+    if not fast_mode and baud != FAST_LADDER[0]:
         return FAST_LADDER[0], True
     i = FAST_LADDER.index(baud) if baud in FAST_LADDER else -1
     return FAST_LADDER[(i + 1) % len(FAST_LADDER)], True
@@ -85,6 +100,7 @@ class Session:
         self.calls = None if self.physical else cl.CallClient(self.line, cfg.get("calls_socket"))
         self.ring = None                 # {"call", "count", "next"} while a call rings this line
         self.confirmed_baud = None       # speed of the last AT command understood (RING goes out at this speed)
+        self.confirmed_at = None         # when (monotonic)
 
     def stop(self, *_):
         self.stopping = True
@@ -242,7 +258,7 @@ class Session:
         if high:
             if not self.dtr_armed:
                 log.info("PC DTR seen asserted; DTR hang-up enabled")
-                if self.child is None:
+                if self.child is None and not recent_baud(time.monotonic(), self.confirmed_baud, self.confirmed_at):
                     self.reset_autobaud("PC opened the port")
             self.dtr_armed = True
             self.dtr_low_since = None
@@ -299,7 +315,7 @@ class Session:
                 self.parser.reset_line()
                 self.dtr_armed = False
             if not r:
-                if time.monotonic() - last_rx > AUTOBAUD_IDLE_RESET_S:
+                if idle_reset_due(time.monotonic(), last_rx, self.baud, self.confirmed_baud, self.confirmed_at):
                     self.reset_autobaud("idle")
                 continue
             time.sleep(0.02)
@@ -315,7 +331,12 @@ class Session:
                     data += os.read(self.fd, 4096)
                 except BlockingIOError:
                     pass
-                self.baud, self.fast_mode = next_baud(self.baud, len(data), self.fast_mode)
+                back = recent_baud(time.monotonic(), self.confirmed_baud, self.confirmed_at)
+                self.confirmed_at = None          # used up: if that speed is wrong too, the ladder takes over
+                if back and back != self.baud:
+                    self.baud, self.fast_mode = back, False   # the speed the PC just used: try it first
+                else:
+                    self.baud, self.fast_mode = next_baud(self.baud, len(data), self.fast_mode)
                 self.set_termios()
                 termios.tcflush(self.fd, termios.TCIFLUSH)
                 self.parser.reset_line()
@@ -326,7 +347,7 @@ class Session:
             for line in self.parser.commands:
                 log.info("CMD %s", line)
             if self.parser.commands:
-                self.confirmed_baud = self.baud
+                self.confirmed_baud, self.confirmed_at = self.baud, time.monotonic()
             self.write(out)
             if isinstance(action, Dial):
                 self.dial(action.number)
@@ -682,6 +703,7 @@ class Session:
             self.end_call(call_id, "error", f"cannot start pppd: {e}")
             return "pppd failed"
         log.info("pppd started (pid %d)", self.child.pid)
+        self.busy_hello(force=True)
         reason, rc = None, None
         while reason is None:
             rc = self.child.poll()
@@ -696,6 +718,7 @@ class Session:
             else:
                 if time.monotonic() - self.last_status >= CALL_STATUS_S:
                     self.update_call(call_id, ppp_info)
+                self.busy_hello()
                 time.sleep(0.1)
         self.update_call(call_id, ppp_info)
         if self.child.poll() is None:
@@ -708,6 +731,12 @@ class Session:
         self.end_call(call_id, result, reason)
         self.last_call_id, self.last_reason = call_id, reason
         return reason
+
+    def busy_hello(self, force=False):
+        """During a call the line keeps saying hello (busy): the call service forgets a line silent for 90 s, and the
+        GUI then said "no modem line" while callers got NO CARRIER instead of BUSY."""
+        if self.calls is not None:
+            self.calls.update(False, self.confirmed_baud or self.baud, force=force, busy=True)
 
     def update_call(self, call_id, ppp_info):
         """Refresh traffic counters and the PPP login (from the ip-up hook) for the GUI."""

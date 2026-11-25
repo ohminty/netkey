@@ -119,6 +119,7 @@ class DemoParty:
                           "last_ok": now - (down_for if down_for >= 0 else random.uniform(0.5, 3))}
         if s["role"] == "host":
             out.update(party_id=s["party_id"], name=s["name"], endpoint=None if hub else s["endpoint"],
+                       share_files=bool(s.get("share_files")) and not s.get("public"),
                        relay=s.get("relay", "de-fra") if hub else None,
                        port=None if hub else s["port"], max=s["max"], closing=bool(s["closing_at"]),
                        code=s["code"] if hub else pt.encode_code(s["party_id"], s["endpoint"], s["port"],
@@ -144,9 +145,11 @@ class DemoParty:
                        verify=verify(self.box),
                        rtt_ms=round(random.uniform(30, 45), 1) if approved else None,
                        handshake_age=random.randrange(1, 25) if approved else None,
-                       view={"name": s["party_name"], "share_internet": False,
+                       view={"name": s["party_name"], "share_internet": False, "share_files": True,
+                             "files_name": "RETROHUB", "files_share": "FILES", "files_address": "10.99.0.1",
                              "members": [{"id": 1, "name": "BOB-P133"}, {"id": 3, "name": self.box}]}
-                       if approved else None)
+                       if approved else None,
+                       host_files=("RETROHUB", "FILES", "10.99.0.1") if approved else None)
         return out
 
     def command(self, data):
@@ -155,7 +158,8 @@ class DemoParty:
         self.tick()
         cmd, s, cid = data.get("cmd"), self.s, f"demo-{time.time()}"
         need = {"create": "standalone", "join": "standalone", "approve": "host", "reject": "host", "kick": "host",
-                "regenerate": "host", "close": "host", "endpoint": "host", "leave": "member", "relays": None}
+                "regenerate": "host", "close": "host", "endpoint": "host", "leave": "member", "relays": None,
+                "share_files": "host"}
         if cmd not in need:
             raise ValueError("unknown LAN party command")
         if cmd == "relays":
@@ -165,6 +169,13 @@ class DemoParty:
                                                "host": "Only the party host can do that",
                                                "member": "This box is not a party member"}[need[cmd]])
         target = str(data.get("member", "")).strip()
+        if cmd == "share_files":
+            on = data.get("on") is True
+            if on and s.get("public"):
+                return self.note(cid, cmd, False, "A public party never gets your files: everyone in it is a stranger")
+            s["share_files"] = on
+            return self.note(cid, cmd, True, "The party PCs can now use this box's file share, like your own PCs"
+                             if on else "Your file share is for your own retro LAN again")
         if cmd == "create":
             via = str(data.get("via") or "hub")
             if via not in ("hub", "direct"):

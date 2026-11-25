@@ -1401,8 +1401,10 @@ const connBadge = (c, relay) => (c === "relay"
 const PARTY_CMD_ERR = {
   create: "Could not host a party", join: "Could not join the party", approve: "Could not approve", reject: "Could not reject",
   kick: "Could not remove the member", regenerate: "Could not create a new invite code", endpoint: "Could not change the address",
-  leave: "Could not leave the party", close: "Could not close the party",
+  leave: "Could not leave the party", close: "Could not close the party", share_files: "Could not change file sharing",
 };
+// sharing the host's file share with a private party: friends' PCs get the same access as your own
+const PARTY_FILES_TEXT = "Every PC in this party can open, change and delete the files in this box's file share, just like your own retro PCs. Deleted files go to the trash for 7 days. It turns off when the party ends.";
 const partySeen = new Set();
 let partyCutoff = null;
 // Toasts unsolicited party events ("notice" results) once; on first load only the last ~60 s are replayed.
@@ -1820,6 +1822,7 @@ const Lan = {
             <li data-key="pr-host">${avatar(v.name || "?")}<b class="mono ellipsis">${v.name || partyName(p)}</b><span class="badge">HOST</span></li>
             ${(v.members || []).map((m) => html`<li data-key="pr-${m.id}">${avatar(m.name)}<b class="mono ellipsis">${m.name}</b>${m.id === p.member_id ? html`<span class="badge badge-vmm">YOU</span>` : ""}<span class="spacer"></span><span class="faint tnum">#${m.id}</span></li>`)}
           </ul></div>` : ""}
+        ${p.host_files && approved ? html`<p class="party-reach">${icon("folder", "i-sm")}<span>The host shares its files with the party: <b class="mono">\\\\${p.host_files[0]}\\${p.host_files[1]}</b> in Network Neighborhood, or <span class="mono">${p.host_files[2]}</span> for FTP, the web and Mac file sharing.</span></p>` : ""}
         <div class="party-foot"><span class="faint">${unreachable ? "Reconnects automatically when the host is back." : approved ? "Your retro PCs are on the party LAN." : "Leaving cancels the join request."}</span><span class="spacer"></span>
           <button type="button" class="btn btn-sm btn-danger-text ${bz("leave")}" data-action="party-leave" ${dis}>${icon("logout")}Leave party</button></div>
       </div>
@@ -2208,10 +2211,22 @@ const Parties = {
         <span class="iso-ic">${icon("globe")}</span>
         <span class="lt-text"><b>Share my internet with the party</b><small>${share ? (p.public ? "On: everyone in this public party uses your connection, and what they do online comes from your home IP." : "On: PCs in the party reach the internet through this box, using your IP address.") : "Off: a LAN only. PCs in the party can't reach the internet."}</small></span>
         ${sw("party-sw-share", "party-share", share, so)}</label>
+      ${p.public ? "" : this.filesSwitch(p, sw)}
       ${p.public ? html`<label class="party-auto" for="party-sw-chat" data-key="sw-chat">
         <span class="iso-ic">${icon("users")}</span>
         <span class="lt-text"><b>Party chat</b><small>${this.chatOn(p) ? "On: boxes in the party can chat here." : "Off: nobody can read or post. Messages are kept for when you turn it back on."}</small></span>
         ${sw("party-sw-chat", "party-chat", this.chatOn(p), this.chatOpt && this.chatOpt.saving)}</label>` : ""}`;
+  },
+  filesSwitch(p, sw) {
+    const on = !!p.share_files, fsx = shareState(), active = !!(fsx && fsx.active);
+    const where = fsx && fsx.name ? html` as <b class="mono">${shareAddr(fsx, "smb")}</b> (or <span class="mono">${fsx.address || ""}</span>)` : "";
+    const note = !active ? (on ? "On, but this box's file sharing is not running: see the Files page." : "This box's file sharing is not running: see the Files page.")
+      : on ? html`On: PCs at every box in the party can use your files${where}, with the same access as your own PCs.`
+      : "Off: only your own retro PCs can use your files.";
+    return html`<label class="party-auto ${on ? "is-warn" : ""}" for="party-sw-files" data-key="sw-files">
+        <span class="iso-ic">${icon("folder")}</span>
+        <span class="lt-text"><b>Share my local files with the party</b><small>${note}</small></span>
+        ${sw("party-sw-files", "party-files", on, this.busy === "share_files")}</label>`;
   },
   // only the party's own boxes see its chat: the host, members who were let in, or (planned) boxes that RSVP'd
   inParty(l) { return !!(l && (l.host_view || l.mine || (l.state === "live" ? l.joined : l.going))); },
@@ -2704,6 +2719,15 @@ const Parties = {
         refreshStatus();
       } catch (e) { this.shareOpt = null; toastErr(e, "Could not change internet sharing"); }
       if (current === this) this.render();
+    },
+    async "party-files"(input) {
+      const on = input.checked;
+      if (on) {
+        input.checked = false;
+        const ok = await confirmDialog({ title: "Share your files with the party?", message: PARTY_FILES_TEXT, confirmText: "Share files" });
+        if (!ok || current !== this) { this.render(); return; }
+      }
+      await this.cmd("share_files", { on });
     },
     async "party-chat"(input) {
       const p = partyState() || {}, on = input.checked;
