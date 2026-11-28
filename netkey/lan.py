@@ -1358,6 +1358,8 @@ class LanDaemon:
         try:
             return self.hub_client().call(method, path, body)
         except hc.HubError as e:
+            if e.status == 404 and self.agent:
+                self.agent.check.set()            # "hosts no party", "no such member": is the party still there?
             raise ValueError(f"Hub: {e}") from None
 
     def relay_endpoint(self, port, relay=None):
@@ -1465,10 +1467,34 @@ class LanDaemon:
             except Exception:
                 log.exception("lan: hub event %s", e.get("type"))
 
+    def hub_state(self, st, at):
+        """The hub's view of this box (GET /v1/state, see HubAgent): ends a party the hub no longer has."""
+        d = self.party.data
+        role = d.get("role")
+        if st.get("role") not in ("host", "member", "none"):
+            return                                        # not an answer we understand: change nothing
+        if d.get("via") != "hub" or role not in ("host", "member") or d.get("closing_at"):
+            return
+        if float(d.get("created") or d.get("since") or 0) > at:
+            return                                        # this party began after the hub was asked
+        if st.get("role") == role and st.get("party") == d.get("hub_party"):
+            return
+        log.info("lan: the hub has no party %s for this box (it says %s)", d.get("hub_party"), st.get("role"))
+        if role == "host":
+            self.leave_party("The hub closed this party while this box was away. Start a new party to get a new "
+                             "invite code.")
+        elif d.get("status") in ("joining", "pending"):
+            self.leave_party("The join request ran out while this box was away; ask to join again")
+        else:
+            self.leave_party("The party ended while this box was away, or the host removed it; join again")
+
     def hub_event(self, e):
         t = e.get("type")
         with self.lock:
             d = self.party.data
+            if t == "_state":
+                self.hub_state(e.get("state") or {}, float(e.get("at") or 0))
+                return
             if t == "listing_started":
                 lid = str(e.get("listing") or "")
                 if self.party.role == "standalone" and lid in self.watches():
@@ -1668,6 +1694,7 @@ class LanDaemon:
                 self.party.data = {"role": "member", "via": "hub", "status": "joining", "hub_party": r["party"],
                                    "party_name": pt.clean_name(r.get("party_name")), "host_pub": r["host_pub"],
                                    "party_id": 0, "priv": priv, "pub": pub, "name": name, "hub_seq": 0,
+                                   "since": time.time(),
                                    "public": True, "listing": str(r.get("listing") or "")[:12]}
                 self.party.save()
                 self.host_rt = {}
@@ -1683,7 +1710,7 @@ class LanDaemon:
                     raise ValueError("This box is already in that party")
                 self.party.data = {"role": "member", "via": "hub", "status": "joining", "hub_party": r["party"],
                                    "party_name": pt.clean_name(r.get("party_name")), "host_pub": r["host_pub"],
-                                   "party_id": 0,
+                                   "party_id": 0, "since": time.time(),
                                    "priv": priv, "pub": pub, "name": name, "hub_seq": 0}
                 self.party.save()
                 self.host_rt = {}

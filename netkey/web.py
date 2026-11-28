@@ -519,6 +519,9 @@ class App:
             u["error"] = ("The cloud hub doesn't announce updates yet." if e.status == 404 else str(e))
         except Exception as e:                       # never let a check break the status
             u["error"] = f"Update check failed: {e}"
+        if u["latest"] and VERSION_RE.match(str(u["latest"])):
+            # the release the hub offers this box (golden, or the newest for a pilot), not GitHub's latest
+            u["command"] = UPDATE_CMD.replace("| sudo bash", f"| sudo NETKEY_VERSION={str(u['latest']).lstrip('v')} bash")
         u["available"] = version_newer(u["latest"], cur)
         u["required"] = u["required"] and u["available"]
         if u["available"] and not prev.get("available"):

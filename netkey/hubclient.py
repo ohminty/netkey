@@ -171,27 +171,42 @@ class HubAgent(threading.Thread):
         self.last_ok = None
         self.callback = None          # callback(event) -> True when it handled the event (then it isn't queued)
         self.stopping = threading.Event()
+        self.check = threading.Event()  # ask the hub whether this box is still in its party (GET /v1/state)
+        self.check.set()                # when the channel starts, and again after every outage (below)
 
     def run(self):
         backoff = 2
         while not self.stopping.is_set():
             try:
-                d = self.client.call("GET", f"/v1/events?after={self.after}&wait=25", timeout=40)
-                for e in d.get("events", []):
-                    self.after = max(self.after, e["seq"])
-                    try:
-                        if self.callback and self.callback(e):
-                            continue
-                    except Exception:  # noqa: BLE001 - a broken handler must not stop the event channel
-                        log.exception("lan: hub event %s", e.get("type"))
-                    self.events.put(e)
+                check = self.check.is_set()
+                # when checking, the waiting events come first (they say why: rejected, kicked, closed), then the
+                # state: the hub keeps events for a day, so a box that was away longer, or whose party the hub
+                # closed (its host away too long, a ban, a reset hub), learns it only from its current state
+                d = self.client.call("GET", f"/v1/events?after={self.after}&wait={0 if check else 25}", timeout=40)
+                self.deliver(d.get("events", []))
+                if check:
+                    at = time.time()
+                    st = self.client.call("GET", "/v1/state")
+                    self.check.clear()
+                    self.events.put({"type": "_state", "state": st, "at": at})
                 self.online, self.error, self.last_ok, backoff = True, None, time.time(), 2
             except HubError as e:
                 if self.online or self.error != str(e):
                     log.warning("lan: hub: %s", e)
                 self.online, self.error = False, str(e)
+                self.check.set()          # back online: check the party first
                 self.stopping.wait(backoff)
                 backoff = min(backoff * 2, 60)
+
+    def deliver(self, events):
+        for e in events:
+            self.after = max(self.after, e["seq"])
+            try:
+                if self.callback and self.callback(e):
+                    continue
+            except Exception:  # noqa: BLE001 - a broken handler must not stop the event channel
+                log.exception("lan: hub event %s", e.get("type"))
+            self.events.put(e)
 
     def stop(self):
         self.stopping.set()
